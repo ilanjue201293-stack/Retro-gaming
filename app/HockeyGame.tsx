@@ -50,7 +50,7 @@ function predictedPuck(source:Frame["puck"],seconds:number,pauseUntil:number){
   return{x:clamp(x,-.04,1.04),y:clamp(y,.045,.955),vx,vy};
 }
 
-export default function HockeyGame({room,user}:{room:Room;user:User}){
+export default function HockeyGame({room,user}:{room:Room;user:User;onActiveChange?:(active:boolean)=>void}){
   const[game,setGame]=useState<Game|null>(null);
   const[error,setError]=useState("");
   const[busy,setBusy]=useState(false);
