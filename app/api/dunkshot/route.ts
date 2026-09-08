@@ -110,6 +110,49 @@ function parseResult(value: unknown): LastResult | null {
   if (!raw.shotId || !raw.shooterId) return null;
   return { shotId: String(raw.shotId), shooterId: String(raw.shooterId), made: Boolean(raw.made), at: Number(raw.at) || Date.now() };
 }
+
+const DUNK_BALL_START_X = 0.5;
+const DUNK_BALL_START_Y = 0.86;
+const DUNK_GRAVITY = 1.95;
+
+function dunkClamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function dunkTrajectory(power: number, aim: number, elapsed: number) {
+  const initialY = -(1.30 + dunkClamp(power, 0, 1) * 0.55);
+  const initialX = dunkClamp(aim, -1, 1) * (0.34 + dunkClamp(power, 0, 1) * 0.10);
+  return {
+    x: DUNK_BALL_START_X + initialX * elapsed,
+    y: DUNK_BALL_START_Y + initialY * elapsed + 0.5 * DUNK_GRAVITY * elapsed * elapsed,
+    velocityY: initialY + DUNK_GRAVITY * elapsed,
+  };
+}
+
+function dunkHoopPosition(streak: number, now: number) {
+  if (streak < 2) return { x: 0.5, y: 0.285 };
+  const horizontalAmplitude = Math.min(0.285, 0.085 + (streak - 2) * 0.018);
+  const horizontalSpeed = 0.00105 + Math.min(0.00125, streak * 0.000085);
+  const x = 0.5 + horizontalAmplitude * Math.sin(now * horizontalSpeed + streak * 1.43);
+  if (streak < 6) return { x, y: 0.285 };
+  const verticalAmplitude = Math.min(0.07, 0.018 + (streak - 6) * 0.006);
+  const y = 0.285 + verticalAmplitude * Math.sin(now * (0.0008 + streak * 0.000045) + 0.9);
+  return { x, y };
+}
+
+function dunkshotShotMade(shot: Shot, streak: number) {
+  let lastY = DUNK_BALL_START_Y;
+  const step = 1 / 240;
+  for (let elapsed = 0; elapsed <= 2.15; elapsed += step) {
+    const point = dunkTrajectory(shot.power, shot.aim, elapsed);
+    const hoop = dunkHoopPosition(streak, shot.startedAt + elapsed * 1000);
+    const rimY = hoop.y + 0.065;
+    if (lastY < rimY && point.y >= rimY && point.velocityY > 0 && Math.abs(point.x - hoop.x) <= 0.071) return true;
+    lastY = point.y;
+    if ((elapsed > 0.55 && point.y > 1.14) || Math.abs(point.x) > 1.28) break;
+  }
+  return false;
+}
 function output(row: Row) {
   return {
     status: row.status,
@@ -235,7 +278,7 @@ export async function POST(req: NextRequest) {
         if (shot.shooterId !== user.id) throw new Error("Seul le tireur peut valider son tir.");
         const players = parsePlayers(current.players);
         const lives = parseLives(current.lives);
-        const made = Boolean(data.made);
+        const made = dunkshotShotMade(shot, Math.max(0, Number(current.streak) || 0));
         let streak = Math.max(0, Number(current.streak) || 0);
         let winnerId: string | null = null;
         if (made) streak += 1;
