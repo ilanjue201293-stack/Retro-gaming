@@ -38,6 +38,7 @@ type Simulation = {
   lastCheckpointLeft: number;
   lastCheckpointRight: number;
   timeoutResolved: boolean;
+  botState?: { phase: "setup" | "strike" | "recover"; until: number; aimY: number };
 };
 
 const ICE_SERVERS: RTCIceServer[] = [
@@ -252,22 +253,73 @@ function updateHockeyBot(simulation: Simulation, game: Game, now: number) {
   const bot = game.players.find((player) => player.isBot);
   if (!bot) return;
   const paddle = simulation.frame.paddles[bot.userId] ?? initialPaddle(bot, game.mode);
-  if (Date.now() < simulation.frame.pauseUntil) { simulation.targets[bot.userId] = { ...paddle, vx: 0, vy: 0 }; return; }
-  const difficulty = bot.difficulty ?? "normal";
-  const speed = difficulty === "easy" ? 0.58 : difficulty === "hard" ? 1.18 : 0.86;
-  const accuracy = difficulty === "easy" ? 0.075 : difficulty === "hard" ? 0.018 : 0.042;
   const puck = simulation.frame.puck;
-  const attack = bot.side === "right" ? puck.x > 0.48 : puck.x < 0.52;
+  const difficulty = bot.difficulty ?? "normal";
+  const baseSpeed = difficulty === "easy" ? 0.40 : difficulty === "hard" ? 0.72 : 0.54;
+  const strikeSpeed = difficulty === "easy" ? 0.62 : difficulty === "hard" ? 1.02 : 0.78;
+  const aimError = difficulty === "easy" ? 0.10 : difficulty === "hard" ? 0.035 : 0.065;
   const guardX = bot.side === "right" ? 0.82 : 0.18;
-  const desiredX = attack ? clamp(puck.x + (bot.side === "right" ? 0.055 : -0.055), bot.side === "right" ? 0.56 : 0.10, bot.side === "right" ? 0.90 : 0.44) : guardX;
-  const wobble = Math.sin(now / 420 + game.leftScore * 1.7 + game.rightScore) * accuracy;
-  const desiredY = clamp(puck.y + wobble, 0.11, 0.89);
+  const direction = bot.side === "right" ? -1 : 1;
+
+  if (Date.now() < simulation.frame.pauseUntil) {
+    simulation.botState = { phase: "recover", until: now + 350, aimY: 0.5 };
+    simulation.targets[bot.userId] = { ...initialPaddle(bot, game.mode) };
+    return;
+  }
+
+  let state = simulation.botState;
+  if (!state) state = simulation.botState = { phase: "setup", until: 0, aimY: puck.y };
+
+  const puckOnBotHalf = bot.side === "right" ? puck.x > 0.50 : puck.x < 0.50;
+  const behindX = puck.x - direction * 0.115;
+  const strikeX = puck.x + direction * 0.105;
+  const wobble = Math.sin(now / 530 + game.leftScore * 1.9 + game.rightScore * 1.3) * aimError;
+
+  let desiredX = guardX;
+  let desiredY = clamp(puck.y + wobble, 0.12, 0.88);
+  let speed = baseSpeed;
+
+  if (!puckOnBotHalf && state.phase !== "strike") {
+    state.phase = "recover";
+    state.until = now + 280;
+  }
+
+  if (state.phase === "recover") {
+    desiredX = guardX;
+    desiredY = clamp(0.5 + wobble * 0.5, 0.22, 0.78);
+    if (now >= state.until && Math.hypot(paddle.x - guardX, paddle.y - desiredY) < 0.08) {
+      state.phase = "setup";
+      state.aimY = puck.y;
+    }
+  } else if (state.phase === "setup") {
+    desiredX = clampPaddle(bot.side, behindX, puck.y).x;
+    desiredY = clamp(puck.y + wobble, 0.12, 0.88);
+    const distanceToSetup = Math.hypot(paddle.x - desiredX, paddle.y - desiredY);
+    if (puckOnBotHalf && distanceToSetup < 0.045) {
+      state.phase = "strike";
+      state.until = now + (difficulty === "hard" ? 180 : difficulty === "easy" ? 135 : 155);
+      state.aimY = clamp(puck.y + wobble, 0.12, 0.88);
+    }
+  } else {
+    desiredX = clampPaddle(bot.side, strikeX, state.aimY).x;
+    desiredY = state.aimY;
+    speed = strikeSpeed;
+    if (now >= state.until) {
+      state.phase = "recover";
+      state.until = now + (difficulty === "hard" ? 260 : difficulty === "easy" ? 480 : 360);
+    }
+  }
+
   const dt = clamp((now - simulation.lastTs) / 1000, 0.008, 0.032);
   const dx = desiredX - paddle.x, dy = desiredY - paddle.y, distance = Math.hypot(dx, dy);
   const maxMove = speed * dt;
   const factor = distance > maxMove && distance > 0.0001 ? maxMove / distance : 1;
   const point = clampPaddle(bot.side, paddle.x + dx * factor, paddle.y + dy * factor);
-  simulation.targets[bot.userId] = { x: point.x, y: point.y, vx: (point.x - paddle.x) / dt, vy: (point.y - paddle.y) / dt };
+  simulation.targets[bot.userId] = {
+    x: point.x, y: point.y,
+    vx: (point.x - paddle.x) / Math.max(dt, 0.001),
+    vy: (point.y - paddle.y) / Math.max(dt, 0.001),
+  };
 }
 
 export default function HockeyGame({ room, user }: { room: Room; user: User; onActiveChange?: (active: boolean) => void }) {
@@ -434,7 +486,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
       try { const data = await post({ action: "hockeySignalPoll", code: room.code, after: signalCursorRef.current }); if (!alive) return; signalCursorRef.current = Number(data.cursor ?? signalCursorRef.current); for (const signal of (data.signals ?? []) as Signal[]) await handleSignal(signal); } catch {}
       const current = gameRef.current; let directReady = false;
       if (current && current.status !== "lobby") { if (room.hostId === user.id) { const remotes = current.players.filter((player) => player.userId !== user.id && !player.isBot); directReady = remotes.length > 0 && remotes.every((player) => peersRef.current.get(player.userId)?.dc?.readyState === "open"); } else directReady = peersRef.current.get(room.hostId)?.dc?.readyState === "open"; }
-      timer = window.setTimeout(() => void signalPoll(), directReady ? 1000 : 180);
+      timer = window.setTimeout(() => void signalPoll(), directReady ? 700 : 90);
     };
     void signalPoll(); return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };
   }, [game?.status, handleSignal, room.code, room.hostId, user.id]);
@@ -480,7 +532,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
         simulation.lastCheckpointLeft = simulation.frame.leftScore; simulation.lastCheckpointRight = simulation.frame.rightScore; resetLocalToStart(current); checkpoint(simulation.frame.leftScore, simulation.frame.rightScore, simulation.frame.winnerSide);
       }
       if (now - simulation.lastBroadcast >= 33) { simulation.lastBroadcast = now; const message = JSON.stringify({ type: "state", state: simulation.frame }); for (const player of current.players) { if (player.userId === user.id || player.isBot) continue; const channel = peersRef.current.get(player.userId)?.dc; if (channel?.readyState === "open") { try { channel.send(message); } catch {} } } }
-      if (now - simulation.lastFallbackBroadcast >= 280) { simulation.lastFallbackBroadcast = now; for (const player of current.players) { if (player.userId === user.id || player.isBot) continue; const channel = peersRef.current.get(player.userId)?.dc; if (channel?.readyState !== "open") void sendSignal(player.userId, "state", simulation.frame).catch(() => undefined); } }
+      if (now - simulation.lastFallbackBroadcast >= 170) { simulation.lastFallbackBroadcast = now; for (const player of current.players) { if (player.userId === user.id || player.isBot) continue; const channel = peersRef.current.get(player.userId)?.dc; if (channel?.readyState !== "open") void sendSignal(player.userId, "state", simulation.frame).catch(() => undefined); } }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick); return () => cancelAnimationFrame(raf);
@@ -495,7 +547,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
   const sendRemoteInput = useCallback((packet: InputPacket, force = false) => {
     if (room.hostId === user.id) return; const now = performance.now(), channel = peersRef.current.get(room.hostId)?.dc;
     if (channel?.readyState === "open") { if (force || now - lastDirectInputSendRef.current >= 12) { lastDirectInputSendRef.current = now; try { channel.send(JSON.stringify({ type: "input", input: packet })); } catch {} } return; }
-    if (force || now - lastFallbackInputSendRef.current >= 130) { lastFallbackInputSendRef.current = now; void sendSignal(room.hostId, "input", packet).catch(() => undefined); }
+    if (force || now - lastFallbackInputSendRef.current >= 85) { lastFallbackInputSendRef.current = now; void sendSignal(room.hostId, "input", packet).catch(() => undefined); }
   }, [room.hostId, sendSignal, user.id]);
 
   useEffect(() => { if (!game || game.status !== "playing" || room.hostId === user.id) return; const id = window.setInterval(() => { if (!draggingRef.current || !localInputRef.current) return; const snapshot = remoteSnapshotRef.current?.frame; if (snapshot && Date.now() < snapshot.pauseUntil) return; sendRemoteInput(localInputRef.current, true); }, 28); return () => window.clearInterval(id); }, [game?.status, room.hostId, sendRemoteInput, user.id]);

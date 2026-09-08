@@ -29,7 +29,7 @@ type Row = {
 };
 
 const CHOICE_MS = 3000;
-const CHOICE_NETWORK_GRACE_MS = 650;
+const CHOICE_NETWORK_GRACE_MS = 1500;
 const CHANT_MS = 2100;
 const REVEAL_MS = 1800;
 const VALID_CHOICES = new Set<Choice>(["rock", "paper", "scissors"]);
@@ -122,9 +122,11 @@ function randomChoice(): Choice {
   return (["rock", "paper", "scissors"] as Choice[])[Math.floor(Math.random() * 3)];
 }
 function counterChoice(choice: Choice): Choice { return choice === "rock" ? "paper" : choice === "paper" ? "scissors" : "rock"; }
+function losingChoice(choice: Choice): Choice { return choice === "rock" ? "scissors" : choice === "paper" ? "rock" : "paper"; }
 function botChoiceAgainst(choice: Choice, difficulty: BotDifficulty): Choice {
-  const chance = difficulty === "easy" ? 0.18 : difficulty === "hard" ? 0.68 : 0.4;
-  return Math.random() < chance ? counterChoice(choice) : randomChoice();
+  if (difficulty === "easy" && Math.random() < 0.5) return losingChoice(choice);
+  if (difficulty === "hard" && Math.random() < 0.42) return counterChoice(choice);
+  return randomChoice();
 }
 
 function roundWinner(left: Choice, right: Choice): Side | null {
@@ -227,7 +229,7 @@ async function advance(code: string) {
   }
 }
 
-async function recordChoice(code: string, userId: string, choice: Choice) {
+async function recordChoice(code: string, userId: string, choice: Choice, expectedRoundIndex: number) {
   await ensureGame(code);
   const client = await db().connect();
   try {
@@ -242,6 +244,7 @@ async function recordChoice(code: string, userId: string, choice: Choice) {
     if (!row) throw new Error("Pierre-Feuille-Ciseaux indisponible.");
     const players = parsePlayers(row.players);
     if (!players.some((player) => player.userId === userId)) throw new Error("Tu ne joues pas cette partie.");
+    if (row.round_index !== expectedRoundIndex) throw new Error("Cette manche est déjà terminée. Choisis pour la suivante.");
 
     // Un clic reçu juste après 0 s peut être arrivé à temps côté joueur mais subir
     // quelques centaines de ms de réseau. On lui laisse donc une petite marge.
@@ -363,7 +366,8 @@ export async function POST(req: NextRequest) {
     if (action === "choose") {
       const choice = String(data.choice ?? "") as Choice;
       if (!VALID_CHOICES.has(choice)) throw new Error("Choix invalide.");
-      const row = await recordChoice(code, user.id, choice);
+      const roundIndex = Math.max(0, Math.round(Number(data.roundIndex)));
+      const row = await recordChoice(code, user.id, choice, roundIndex);
       return NextResponse.json({ ok: true, game: output(row, user.id) });
     }
 

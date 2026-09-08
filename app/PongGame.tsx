@@ -41,6 +41,8 @@ type Simulation = {
   lastCheckpointLeft: number;
   lastCheckpointRight: number;
   timeoutResolved: boolean;
+  botThinkAt?: number;
+  botTargetY?: number;
 };
 
 const ICE_SERVERS: RTCIceServer[] = [
@@ -239,12 +241,25 @@ function updatePongBot(simulation: Simulation, game: Game, now: number) {
   if (!bot) return;
   const paddle = simulation.frame.paddles[bot.userId] ?? { y: 0.5, vy: 0 };
   const difficulty = bot.difficulty ?? "normal";
-  const speed = difficulty === "easy" ? 0.48 : difficulty === "hard" ? 1.04 : 0.72;
-  const error = difficulty === "easy" ? 0.105 : difficulty === "hard" ? 0.025 : 0.055;
+  const speed = difficulty === "easy" ? 0.28 : difficulty === "hard" ? 0.58 : 0.40;
+  const reactionMs = difficulty === "easy" ? 340 : difficulty === "hard" ? 115 : 215;
+  const error = difficulty === "easy" ? 0.17 : difficulty === "hard" ? 0.055 : 0.105;
   const ball = simulation.frame.ball;
   const movingTowardBot = bot.side === "right" ? ball.vx > 0 : ball.vx < 0;
-  const wobble = Math.sin(now / 360 + simulation.frame.leftScore * 1.4) * error;
-  const desired = movingTowardBot ? clampPaddleY(ball.y + wobble) : 0.5;
+
+  if (!simulation.botThinkAt || now >= simulation.botThinkAt) {
+    simulation.botThinkAt = now + reactionMs;
+    const wobble = Math.sin(now / 410 + simulation.frame.leftScore * 1.7 + simulation.frame.rightScore * 0.9) * error;
+    if (movingTowardBot) {
+      const travel = bot.side === "right" ? Math.max(0, PADDLE_X_RIGHT - ball.x) : Math.max(0, ball.x - PADDLE_X_LEFT);
+      const timeToPaddle = Math.min(0.55, travel / Math.max(0.18, Math.abs(ball.vx)));
+      simulation.botTargetY = clampPaddleY(ball.y + ball.vy * timeToPaddle * 0.55 + wobble);
+    } else {
+      simulation.botTargetY = clampPaddleY(0.5 + wobble * 0.45);
+    }
+  }
+
+  const desired = simulation.botTargetY ?? 0.5;
   const dt = clamp((now - simulation.lastTs) / 1000, 0.008, 0.032);
   const delta = clamp(desired - paddle.y, -speed * dt, speed * dt);
   simulation.targets[bot.userId] = clampPaddleY(paddle.y + delta);

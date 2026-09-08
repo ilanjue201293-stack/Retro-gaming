@@ -58,6 +58,7 @@ export default function RpsGame({ room, user }: { room: Room; user: User }) {
   const [error, setError] = useState("");
   const [clock, setClock] = useState(Date.now());
   const gameRef = useRef<Game | null>(null);
+  const pendingChoiceRef = useRef<{ roundIndex: number; choice: Choice } | null>(null);
 
   useEffect(() => { gameRef.current = game; }, [game]);
   useEffect(() => {
@@ -74,7 +75,14 @@ export default function RpsGame({ room, user }: { room: Room; user: User }) {
       try {
         const data = await post({ action: "state", code: room.code });
         if (alive) {
-          setGame(data.game as Game);
+          const next = data.game as Game;
+          const pending = pendingChoiceRef.current;
+          if (pending && next.status === "playing" && next.phase === "choosing" && next.roundIndex === pending.roundIndex && !next.myChoice) {
+            next.myChoice = pending.choice;
+          } else if (pending && (next.roundIndex !== pending.roundIndex || next.phase !== "choosing" || next.myChoice === pending.choice)) {
+            pendingChoiceRef.current = null;
+          }
+          setGame(next);
           setError("");
         }
       } catch (pollError) {
@@ -133,12 +141,17 @@ export default function RpsGame({ room, user }: { room: Room; user: User }) {
   const choose = async (choice: Choice) => {
     if (busy || game?.phase !== "choosing" || game.myChoice) return;
     const before = game;
+    pendingChoiceRef.current = { roundIndex: game.roundIndex, choice };
     setGame({ ...game, myChoice: choice });
     try {
       setBusy(true); setError("");
-      const data = await post({ action: "choose", code: room.code, choice });
-      setGame(data.game as Game);
+      const data = await post({ action: "choose", code: room.code, choice, roundIndex: game.roundIndex });
+      const next = data.game as Game;
+      if (next.phase === "choosing" && next.roundIndex === game.roundIndex && next.myChoice !== choice) throw new Error("Le serveur n'a pas enregistré ton choix. Réessaie.");
+      pendingChoiceRef.current = null;
+      setGame(next);
     } catch (actionError) {
+      pendingChoiceRef.current = null;
       setGame(before);
       setError(actionError instanceof Error ? actionError.message : "Impossible d'enregistrer ton choix.");
     } finally { setBusy(false); }
