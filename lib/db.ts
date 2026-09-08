@@ -125,14 +125,8 @@ export async function ensureSchema() {
           left_score integer not null default 0,
           right_score integer not null default 0,
           winner_side text,
-          state jsonb not null default '{}'::jsonb,
-          inputs jsonb not null default '{}'::jsonb,
-          last_tick_ms bigint not null default 0,
           updated_at timestamptz not null default now()
         );
-        alter table retro_hockey_games add column if not exists state jsonb not null default '{}'::jsonb;
-        alter table retro_hockey_games add column if not exists inputs jsonb not null default '{}'::jsonb;
-        alter table retro_hockey_games add column if not exists last_tick_ms bigint not null default 0;
         create index if not exists retro_sessions_expires_idx on retro_sessions(expires_at);
         create index if not exists retro_users_last_seen_idx on retro_users(last_seen);
         create index if not exists retro_room_members_room_idx on retro_room_members(room_code, joined_at);
