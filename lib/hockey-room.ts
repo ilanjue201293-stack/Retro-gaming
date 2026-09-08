@@ -10,13 +10,13 @@ type Input = Paddle & { at:number };
 type Stored = { roster:Player[]; frame:Frame|null; inputs:Record<string,Input>; lastTick:number; targetScore:number; timeLimitSec:number; startedAt:number|null };
 type Row = { room_code:string; mode:HockeyMode; status:"lobby"|"playing"|"gameover"; players:unknown; left_score:number; right_score:number; winner_side:Side|null };
 
-const PUCK_R=.024, MALLET_R=.052, LEFT=.03, RIGHT=.97, TOP=.045, BOTTOM=.955, GOAL_MIN=.36, GOAL_MAX=.64, MAX_PUCK=.82, MAX_MALLET=1.25, DEFAULT_TARGET=7;
+const PUCK_R=.024, MALLET_R=.052, LEFT=.03, RIGHT=.97, TOP=.045, BOTTOM=.955, GOAL_MIN=.36, GOAL_MAX=.64, MAX_PUCK=.82, MAX_MALLET=1.25, DEFAULT_TARGET=7, INITIAL_COUNTDOWN_MS=5000;
 const clamp=(n:number,min:number,max:number)=>Math.max(min,Math.min(max,n));
 const finite=(n:unknown,f=0)=>{const v=Number(n);return Number.isFinite(v)?v:f};
 function cap(x:number,y:number,max:number){const s=Math.hypot(x,y);if(!Number.isFinite(s)||s<1e-6)return{x:0,y:0};if(s<=max)return{x,y};const k=max/s;return{x:x*k,y:y*k}}
 function initial(p:Player,mode:HockeyMode):Paddle{return{x:p.side==="left"?.2:.8,y:p.slot<0?.5:p.slot===0?.34:.66,vx:0,vy:0}}
 function clampPad(side:Side,x:number,y:number){return{x:clamp(x,side==="left"?.075:.53,side==="left"?.47:.925),y:clamp(y,.085,.915)}}
-function fresh(roster:Player[],mode:HockeyMode,now:number,leftScore=0,rightScore=0,winnerSide:Side|null=null):Frame{return{puck:{x:.5,y:.5,vx:0,vy:0},paddles:Object.fromEntries(roster.map(p=>[p.userId,initial(p,mode)])),leftScore,rightScore,winnerSide,pauseUntil:now+650}}
+function fresh(roster:Player[],mode:HockeyMode,now:number,leftScore=0,rightScore=0,winnerSide:Side|null=null):Frame{return{puck:{x:.5,y:.5,vx:0,vy:0},paddles:Object.fromEntries(roster.map(p=>[p.userId,initial(p,mode)])),leftScore,rightScore,winnerSide,pauseUntil:now+INITIAL_COUNTDOWN_MS}}
 function emptyStored(targetScore=DEFAULT_TARGET,timeLimitSec=0):Stored{return{roster:[],frame:null,inputs:{},lastTick:Date.now(),targetScore:clamp(Math.round(targetScore)||DEFAULT_TARGET,1,30),timeLimitSec:Math.max(0,Math.round(timeLimitSec)||0),startedAt:null}}
 function decode(raw:unknown,row:Row):Stored{
   const now=Date.now();

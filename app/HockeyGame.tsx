@@ -57,6 +57,7 @@ const GOAL_MAX = 0.67;
 const MAX_PUCK_SPEED = 1.45;
 const MAX_MALLET_SPEED = 1.85;
 const INTERNAL_MAX_SCORE = 30;
+const INITIAL_COUNTDOWN_MS = 5000;
 const FACEOFF_MS = 3000;
 const SCORE_OPTIONS = [3, 5, 7, 10, 15];
 const TIME_OPTIONS = [0, 60, 120, 180, 300, 600];
@@ -134,8 +135,8 @@ function capVelocity(x: number, y: number, max: number) {
 function cloneFrame(frame: Frame): Frame {
   return { puck: { ...frame.puck }, paddles: Object.fromEntries(Object.entries(frame.paddles).map(([id, paddle]) => [id, { ...paddle }])), leftScore: frame.leftScore, rightScore: frame.rightScore, winnerSide: frame.winnerSide, pauseUntil: frame.pauseUntil };
 }
-function makeFrame(players: Player[], mode: Mode, leftScore = 0, rightScore = 0): Frame {
-  return { puck: { x: 0.5, y: 0.5, vx: 0, vy: 0 }, paddles: Object.fromEntries(players.map((player) => [player.userId, initialPaddle(player, mode)])), leftScore, rightScore, winnerSide: null, pauseUntil: Date.now() };
+function makeFrame(players: Player[], mode: Mode, leftScore = 0, rightScore = 0, pauseUntil = Date.now()): Frame {
+  return { puck: { x: 0.5, y: 0.5, vx: 0, vy: 0 }, paddles: Object.fromEntries(players.map((player) => [player.userId, initialPaddle(player, mode)])), leftScore, rightScore, winnerSide: null, pauseUntil };
 }
 function resetFaceoff(simulation: Simulation, players: Player[], mode: Mode, concededSide: Side) {
   const paddles = Object.fromEntries(players.map((player) => [player.userId, initialPaddle(player, mode)]));
@@ -209,16 +210,23 @@ function stepSimulation(simulation: Simulation, players: Player[], mode: Mode, d
   const stepDt = dt / steps;
   for (let step = 0; step < steps; step++) {
     const remaining = Math.max(1, steps - step);
+    const paused = Date.now() < frame.pauseUntil;
     const oldPaddles: Record<string, Paddle> = {};
     for (const player of players) {
       const paddle = frame.paddles[player.userId] ?? initialPaddle(player, mode);
       oldPaddles[player.userId] = { ...paddle };
+      if (paused) {
+        const start = initialPaddle(player, mode);
+        frame.paddles[player.userId] = { ...start };
+        simulation.targets[player.userId] = { ...start };
+        continue;
+      }
       const target = simulation.targets[player.userId] ?? paddle;
       const nextX = paddle.x + (target.x - paddle.x) / remaining, nextY = paddle.y + (target.y - paddle.y) / remaining;
       const velocity = capVelocity((nextX - paddle.x) / Math.max(stepDt, 0.001), (nextY - paddle.y) / Math.max(stepDt, 0.001), MAX_MALLET_SPEED);
       paddle.x = nextX; paddle.y = nextY; paddle.vx = velocity.x; paddle.vy = velocity.y; frame.paddles[player.userId] = paddle;
     }
-    if (frame.winnerSide || Date.now() < frame.pauseUntil) continue;
+    if (frame.winnerSide || paused) continue;
     const oldPuck = { ...frame.puck };
     frame.puck.x += frame.puck.vx * stepDt; frame.puck.y += frame.puck.vy * stepDt;
     const friction = Math.pow(0.994, stepDt * 60); frame.puck.vx *= friction; frame.puck.vy *= friction;
@@ -529,14 +537,19 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
   useEffect(() => {
     if (!game || game.status === "lobby") { closeAllPeers(); simulationRef.current = null; remoteSnapshotRef.current = null; signalCursorRef.current = 0; localInputRef.current = null; localPaddleRef.current = null; draggingRef.current = false; setFrame(null); return; }
     signalCursorRef.current = 0; resetLocalToStart(game);
+    const initialPauseUntil = Math.max(Date.now(), game.frame?.pauseUntil ?? ((game.startedAt ?? Date.now()) + INITIAL_COUNTDOWN_MS));
     if (room.hostId === user.id) {
       const key = `${game.mode}:${rosterKey}`;
       if (simulationRef.current?.key !== key) {
-        const initialFrame = makeFrame(game.players, game.mode, game.leftScore, game.rightScore);
+        const initialFrame = makeFrame(game.players, game.mode, game.leftScore, game.rightScore, initialPauseUntil);
         simulationRef.current = { key, frame: initialFrame, targets: Object.fromEntries(game.players.map((player) => [player.userId, initialPaddle(player, game.mode)])), lastTs: performance.now(), lastBroadcast: 0, lastFallbackBroadcast: 0, lastCheckpointLeft: game.leftScore, lastCheckpointRight: game.rightScore, timeoutResolved: false };
         setFrame(cloneFrame(initialFrame));
       }
-    } else if (!frame) setFrame(makeFrame(game.players, game.mode, game.leftScore, game.rightScore));
+    } else if (!frame) {
+      const initialFrame = makeFrame(game.players, game.mode, game.leftScore, game.rightScore, initialPauseUntil);
+      remoteSnapshotRef.current = { frame: cloneFrame(initialFrame), receivedAt: performance.now() };
+      setFrame(initialFrame);
+    }
   }, [closeAllPeers, game?.status, game?.mode, resetLocalToStart, room.hostId, rosterKey, user.id]);
 
   useEffect(() => () => closeAllPeers(), [closeAllPeers]);
@@ -716,7 +729,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
           return <div key={player.userId} className={`hockeyMallet ${player.side} ${player.userId === user.id ? "mine" : ""} ${picture ? "hasPhoto" : ""}`} style={{ left: `${paddle.x * 100}%`, top: `${paddle.y * 100}%`, transition: "none" }}>{picture ? <img src={picture} alt={player.username}/> : <span>{player.username.slice(0, 2).toUpperCase()}</span>}</div>;
         })}
         <div className="hockeyPuck" style={{ left: `${shown.puck.x * 100}%`, top: `${shown.puck.y * 100}%`, transition: "none" }}/>
-        {countdown > 0 && <div className="hockeyCountdown"><b>{countdown}</b><span>REPRISE</span></div>}
+        {countdown > 0 && <div className="hockeyCountdown"><b>{countdown}</b><span>{shown.leftScore === 0 && shown.rightScore === 0 ? "DÉPART" : "REPRISE"}</span></div>}
         {shown.winnerSide && <div className="hockeyWinnerOverlay"><span>🏆</span><h2>{winners || "Équipe"} gagne !</h2><p>{shown.leftScore} — {shown.rightScore}</p>{isHost ? <div className="gameEndActions"><button className="primaryButton" disabled={busy} onClick={() => void replay()}>Rejouer</button><button className="secondaryButton" disabled={busy} onClick={() => void stop()}>Lobby du jeu</button></div> : <small>En attente de l'hôte pour rejouer.</small>}</div>}
       </div>
     </div>
