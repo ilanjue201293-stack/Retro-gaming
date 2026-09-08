@@ -4,7 +4,6 @@ on:
     paths:
       - '.github/workflows/add-bots-and-fix-hockey.yml'
       - 'scripts/apply_bots_patch.py'
-      - 'scripts/run_bots_patch.py'
 permissions:
   contents: write
 jobs:
@@ -17,7 +16,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: python3 scripts/run_bots_patch.py
+      - run: python3 scripts/apply_bots_patch.py
       - run: npm install
       - run: npm run typecheck
       - name: Commit changes
