@@ -1,0 +1,22 @@
+body.hockey-match-active .roomHeading,
+body.hockey-match-active .memberGrid,
+body.hockey-match-active .roomSide,
+body.hockey-match-active .topbar .brandSmall,
+body.hockey-match-active .topbar .roomCode{display:none!important}
+body.hockey-match-active .appShell{max-width:none;padding:10px 14px 86px}
+body.hockey-match-active .topbar{display:flex!important;justify-content:flex-end!important;min-height:52px;border:0}
+body.hockey-match-active .topbar>.ghostButton{display:inline-flex!important;grid-column:auto!important;justify-self:auto!important}
+body.hockey-match-active .roomLayout{display:block!important;padding:0!important}
+body.hockey-match-active .roomMain{width:min(1500px,100%);margin:0 auto}
+body.hockey-match-active .hockeyGameWrap{margin:0!important;padding:0!important;border:0!important;background:transparent!important;box-shadow:none!important}
+body.hockey-match-active .hockeyGameTop{margin:0 auto 10px;max-width:1180px}
+body.hockey-match-active .hockeyScore b{font-size:38px}
+body.hockey-match-active .teamNames strong{font-size:12px}
+body.hockey-match-active .rinkFrame{max-width:1400px;margin:0 auto;padding:8px;border-radius:20px}
+body.hockey-match-active .hockeyRink{aspect-ratio:16/8.7;min-height:min(72vh,760px);max-height:78vh}
+body.hockey-match-active .hockeyGameError{max-width:800px;margin:10px auto}
+.hockeyPuck{transition:left 85ms linear,top 85ms linear}
+.hockeyMallet:not(.mine){transition:left 80ms linear,top 80ms linear}
+.hockeyMallet.mine{transition:none}
+@media(max-width:850px){body.hockey-match-active .appShell{padding:8px 8px 76px}body.hockey-match-active .hockeyRink{aspect-ratio:4/3;min-height:0;max-height:none}body.hockey-match-active .hockeyScore b{font-size:30px}}
+@media(max-width:600px){body.hockey-match-active .topbar{min-height:44px}body.hockey-match-active .rinkFrame{padding:4px}body.hockey-match-active .hockeyRink{aspect-ratio:10/9}.hockeyPuck{transition:left 95ms linear,top 95ms linear}.hockeyMallet:not(.mine){transition:left 90ms linear,top 90ms linear}}
