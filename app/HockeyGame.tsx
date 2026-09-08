@@ -374,6 +374,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
   const isHost = room.hostId === user.id;
   const needed = game?.mode === "2v2" ? 4 : game?.mode === "2v1" ? 3 : 2;
   const onlineMembers = useMemo(() => room.members.filter((member) => member.online), [room.members]);
+  const onlineKey = onlineMembers.map((member) => member.id).join("|");
   const online = onlineMembers.length;
   const caps = teamCaps(game?.mode ?? "1v1", twoPlayerSide);
   const leftHumans = onlineMembers.filter((member) => teamAssignments[member.id] === "left").length;
@@ -401,7 +402,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
       }
       return next;
     });
-  }, [game?.status, game?.mode, isHost, onlineMembers, twoPlayerSide]);
+  }, [game?.status, game?.mode, isHost, onlineKey, twoPlayerSide]);
 
   const assignTeam = useCallback((memberId: string, side: Side | "bench") => {
     if (!game) return;
