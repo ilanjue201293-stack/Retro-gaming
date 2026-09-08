@@ -42,7 +42,7 @@ export function clearSessionCookie(response: NextResponse) {
   response.cookies.set({ name: SESSION_COOKIE, value: "", httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production", path: "/", maxAge: 0 });
 }
 
-export async function getAuthedUser(req: NextRequest): Promise<AuthUser | null> {
+export async function getAuthedUser(req: NextRequest, touchPresence = true): Promise<AuthUser | null> {
   await ensureSchema();
   const token = req.cookies.get(SESSION_COOKIE)?.value;
   if (!token) return null;
@@ -53,12 +53,12 @@ export async function getAuthedUser(req: NextRequest): Promise<AuthUser | null> 
     [sha256(token)]
   );
   const user = result.rows[0] ?? null;
-  if (user) await db().query(`update retro_users set last_seen = now() where id = $1`, [user.id]);
+  if (user && touchPresence) await db().query(`update retro_users set last_seen = now() where id = $1`, [user.id]);
   return user;
 }
 
-export async function requireUser(req: NextRequest) {
-  const user = await getAuthedUser(req);
+export async function requireUser(req: NextRequest, touchPresence = true) {
+  const user = await getAuthedUser(req, touchPresence);
   if (!user) throw new Error("AUTH_REQUIRED");
   return user;
 }
