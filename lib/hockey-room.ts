@@ -66,18 +66,32 @@ export async function hockeyStart(code:string,userId:string){
   const members=await db().query<{id:string;username:string}>(`select u.id,u.username from retro_room_members m join retro_users u on u.id=m.user_id where m.room_code=$1 and m.last_seen>now()-interval '15 seconds' order by m.joined_at`,[code]);
   if(members.rows.length<need)throw new Error(r.mode==="2v2"?"Il faut 4 joueurs connectés pour le 2v2.":"Il faut 2 joueurs connectés pour le 1v1.");
   const roster:Player[]=members.rows.slice(0,need).map((m,i)=>({userId:m.id,username:m.username,side:i%2===0?"left":"right",slot:r.mode==="2v2"?Math.floor(i/2):0})),now=Date.now(),frame=fresh(roster,r.mode,now),inputs=Object.fromEntries(roster.map(p=>[p.userId,{...initial(p,r.mode),at:now}])),s:Stored={roster,frame,inputs,lastTick:now};
-  await db().query(`update retro_hockey_games set status='playing',players=$1::jsonb,left_score=0,right_score=0,winner_side=null,updated_at=now() where room_code=$2`,[JSON.stringify(s),code]);return hockeyState(code);
+  await db().query(`update retro_hockey_games set status='playing',players=$1::jsonb,left_score=0,right_score=0,winner_side=null,updated_at=now() where room_code=$2`,[JSON.stringify(s),code]);return output({...r,status:"playing",players:s,left_score:0,right_score:0,winner_side:null},s);
 }
 export async function hockeyStop(code:string,userId:string){if(await host(code)!==userId)throw new Error("Seul l'hôte peut arrêter le match.");const s:Stored={roster:[],frame:null,inputs:{},lastTick:Date.now()};await db().query(`update retro_hockey_games set status='lobby',players=$1::jsonb,left_score=0,right_score=0,winner_side=null,updated_at=now() where room_code=$2`,[JSON.stringify(s),code]);return hockeyState(code)}
 export async function hockeySync(code:string,userId:string,input?:Partial<Paddle>){
-  const before=await row(code);if(before.status!=="playing")return output(before,decode(before.players,before));
   const client=await db().connect();
   try{
-    await client.query("begin");await client.query(`set local lock_timeout='900ms'`);
-    const rr=await client.query<Row>(`select room_code,mode,status,players,left_score,right_score,winner_side from retro_hockey_games where room_code=$1 for update`,[code]);const r=rr.rows[0];if(!r)throw new Error("Partie hockey introuvable.");const s=decode(r.players,r);
+    await client.query("begin");
+    await client.query(`set local lock_timeout='350ms'`);
+    const rr=await client.query<Row>(`select room_code,mode,status,players,left_score,right_score,winner_side from retro_hockey_games where room_code=$1 for update`,[code]);
+    const r=rr.rows[0];
+    if(!r){await client.query("rollback");return hockeyState(code)}
+    const s=decode(r.players,r);
     if(r.status!=="playing"){await client.query("commit");return output(r,s)}
-    const p=s.roster.find(v=>v.userId===userId);if(p&&input?.x!==undefined&&input?.y!==undefined){const q=clampPad(p.side,finite(input.x),finite(input.y)),v=cap(finite(input.vx),finite(input.vy),MAX_MALLET);s.inputs[userId]={x:q.x,y:q.y,vx:v.x,vy:v.y,at:Date.now()}}
-    advance(s,r.mode,Date.now());r.left_score=s.frame?.leftScore??0;r.right_score=s.frame?.rightScore??0;r.winner_side=s.frame?.winnerSide??null;if(r.winner_side)r.status="gameover";
-    await client.query(`update retro_hockey_games set status=$1,players=$2::jsonb,left_score=$3,right_score=$4,winner_side=$5,updated_at=now() where room_code=$6`,[r.status,JSON.stringify(s),r.left_score,r.right_score,r.winner_side,code]);await client.query("commit");return output(r,s);
-  }catch(e:any){try{await client.query("rollback")}catch{}if(e?.code==="55P03")return hockeyState(code);throw e}finally{client.release()}
+    const p=s.roster.find(v=>v.userId===userId);
+    if(p&&input?.x!==undefined&&input?.y!==undefined){const q=clampPad(p.side,finite(input.x),finite(input.y)),v=cap(finite(input.vx),finite(input.vy),MAX_MALLET);s.inputs[userId]={x:q.x,y:q.y,vx:v.x,vy:v.y,at:Date.now()}}
+    advance(s,r.mode,Date.now());
+    r.left_score=s.frame?.leftScore??0;r.right_score=s.frame?.rightScore??0;r.winner_side=s.frame?.winnerSide??null;if(r.winner_side)r.status="gameover";
+    await client.query(`update retro_hockey_games set status=$1,players=$2::jsonb,left_score=$3,right_score=$4,winner_side=$5,updated_at=now() where room_code=$6`,[r.status,JSON.stringify(s),r.left_score,r.right_score,r.winner_side,code]);
+    await client.query("commit");
+    return output(r,s);
+  }catch(e:any){
+    try{await client.query("rollback")}catch{}
+    if(e?.code==="55P03"){
+      const r=await db().query<Row>(`select room_code,mode,status,players,left_score,right_score,winner_side from retro_hockey_games where room_code=$1 limit 1`,[code]);
+      if(r.rows[0])return output(r.rows[0],decode(r.rows[0].players,r.rows[0]));
+    }
+    throw e;
+  }finally{client.release()}
 }
