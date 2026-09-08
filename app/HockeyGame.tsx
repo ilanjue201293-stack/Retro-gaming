@@ -53,18 +53,18 @@ const ICE_SERVERS: RTCIceServer[] = [
 ];
 
 const PUCK_R = 0.024;
-const MALLET_R = 0.052;
-const CONTACT_MARGIN = 0.0035;
-const CONTACT_SEPARATION = 0.0015;
+const MALLET_R = 0.048;
+const CONTACT_SEPARATION = 0.0012;
 const LEFT_BOARD = 0.03;
 const RIGHT_BOARD = 0.97;
 const TOP_BOARD = 0.045;
 const BOTTOM_BOARD = 0.955;
-const GOAL_MIN = 0.36;
-const GOAL_MAX = 0.64;
-const MAX_PUCK_SPEED = 2.1;
-const MAX_MALLET_SPEED = 2.4;
+const GOAL_MIN = 0.33;
+const GOAL_MAX = 0.67;
+const MAX_PUCK_SPEED = 2.9;
+const MAX_MALLET_SPEED = 2.6;
 const TARGET_SCORE = 7;
+const FACEOFF_MS = 3000;
 
 const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
 
@@ -180,27 +180,51 @@ function makeFrame(players: Player[], mode: Mode, leftScore = 0, rightScore = 0)
     leftScore,
     rightScore,
     winnerSide: null,
-    pauseUntil: Date.now() + 650,
+    pauseUntil: Date.now(),
   };
 }
 
-function collideContinuous(frame: Frame, oldPuck: Puck, oldPaddle: Paddle, paddle: Paddle, side: Side) {
-  const radius = PUCK_R + MALLET_R + CONTACT_MARGIN;
+function resetFaceoff(simulation: Simulation, players: Player[], mode: Mode, concededSide: Side) {
+  const paddles = Object.fromEntries(players.map((player) => [player.userId, initialPaddle(player, mode)]));
+  simulation.frame.paddles = paddles;
+  simulation.targets = Object.fromEntries(players.map((player) => [player.userId, initialPaddle(player, mode)]));
+  simulation.frame.puck = {
+    x: concededSide === "left" ? 0.34 : 0.66,
+    y: 0.5,
+    vx: 0,
+    vy: 0,
+  };
+  simulation.frame.pauseUntil = Date.now() + FACEOFF_MS;
+}
+
+function collidePuckWithPaddle(
+  frame: Frame,
+  oldPuck: Puck,
+  oldPaddle: Paddle,
+  paddle: Paddle,
+  side: Side,
+  stepDt: number
+) {
+  const radius = PUCK_R + MALLET_R;
+  const puckDx = frame.puck.x - oldPuck.x;
+  const puckDy = frame.puck.y - oldPuck.y;
+  const paddleDx = paddle.x - oldPaddle.x;
+  const paddleDy = paddle.y - oldPaddle.y;
   const r0x = oldPuck.x - oldPaddle.x;
   const r0y = oldPuck.y - oldPaddle.y;
-  const r1x = frame.puck.x - paddle.x;
-  const r1y = frame.puck.y - paddle.y;
-  const drx = r1x - r0x;
-  const dry = r1y - r0y;
+  const relDx = puckDx - paddleDx;
+  const relDy = puckDy - paddleDy;
 
   let hitT: number | null = null;
   const startSquared = r0x * r0x + r0y * r0y;
-  if (startSquared <= radius * radius) {
+  const radiusSquared = radius * radius;
+
+  if (startSquared <= radiusSquared) {
     hitT = 0;
   } else {
-    const a = drx * drx + dry * dry;
-    const b = 2 * (r0x * drx + r0y * dry);
-    const c = startSquared - radius * radius;
+    const a = relDx * relDx + relDy * relDy;
+    const b = 2 * (r0x * relDx + r0y * relDy);
+    const c = startSquared - radiusSquared;
     if (a > 0.000000001) {
       const discriminant = b * b - 4 * a * c;
       if (discriminant >= 0) {
@@ -213,46 +237,72 @@ function collideContinuous(frame: Frame, oldPuck: Puck, oldPaddle: Paddle, paddl
     }
   }
 
-  const endDistance = Math.hypot(r1x, r1y);
   if (hitT === null) {
-    if (endDistance > radius) return;
+    const endDx = frame.puck.x - paddle.x;
+    const endDy = frame.puck.y - paddle.y;
+    if (endDx * endDx + endDy * endDy > radiusSquared) return;
     hitT = 1;
   }
 
-  let impactX = r0x + drx * hitT;
-  let impactY = r0y + dry * hitT;
-  let impactDistance = Math.hypot(impactX, impactY);
-  if (impactDistance < 0.0001) {
-    impactX = side === "left" ? 1 : -1;
-    impactY = 0;
-    impactDistance = 1;
-  }
+  const paddleHitX = oldPaddle.x + paddleDx * hitT;
+  const paddleHitY = oldPaddle.y + paddleDy * hitT;
+  const puckHitX = oldPuck.x + puckDx * hitT;
+  const puckHitY = oldPuck.y + puckDy * hitT;
 
-  const nx = impactX / impactDistance;
-  const ny = impactY / impactDistance;
-  const separation = PUCK_R + MALLET_R + CONTACT_SEPARATION;
-  frame.puck.x = paddle.x + nx * separation;
-  frame.puck.y = paddle.y + ny * separation;
+  let nx = puckHitX - paddleHitX;
+  let ny = puckHitY - paddleHitY;
+  let normalLength = Math.hypot(nx, ny);
+  if (normalLength < 0.0001) {
+    nx = side === "left" ? 1 : -1;
+    ny = 0;
+    normalLength = 1;
+  }
+  nx /= normalLength;
+  ny /= normalLength;
 
   const puckNormal = frame.puck.vx * nx + frame.puck.vy * ny;
   const paddleNormal = paddle.vx * nx + paddle.vy * ny;
   const closingSpeed = paddleNormal - puckNormal;
 
-  if (closingSpeed > 0.0005) {
-    const desiredNormal = paddleNormal + closingSpeed * 0.72;
-    const normalDelta = desiredNormal - puckNormal;
-    frame.puck.vx += normalDelta * nx;
-    frame.puck.vy += normalDelta * ny;
+  const separation = radius + CONTACT_SEPARATION;
+  frame.puck.x = paddleHitX + nx * separation;
+  frame.puck.y = paddleHitY + ny * separation;
 
-    const tangentX = paddle.vx - paddleNormal * nx;
-    const tangentY = paddle.vy - paddleNormal * ny;
-    frame.puck.vx += tangentX * 0.12;
-    frame.puck.vy += tangentY * 0.12;
+  if (closingSpeed > 0.0005) {
+    const restitution = 0.9;
+    const outgoingNormal = (1 + restitution) * paddleNormal - restitution * puckNormal;
+    const puckTangentX = frame.puck.vx - puckNormal * nx;
+    const puckTangentY = frame.puck.vy - puckNormal * ny;
+    const paddleTangentX = paddle.vx - paddleNormal * nx;
+    const paddleTangentY = paddle.vy - paddleNormal * ny;
+
+    frame.puck.vx = puckTangentX + outgoingNormal * nx + paddleTangentX * 0.06;
+    frame.puck.vy = puckTangentY + outgoingNormal * ny + paddleTangentY * 0.06;
   }
 
   const velocity = capVelocity(frame.puck.vx, frame.puck.vy, MAX_PUCK_SPEED);
   frame.puck.vx = velocity.x;
   frame.puck.vy = velocity.y;
+
+  const remainingTime = Math.max(0, 1 - hitT) * stepDt;
+  frame.puck.x += frame.puck.vx * remainingTime;
+  frame.puck.y += frame.puck.vy * remainingTime;
+
+  const finalDx = frame.puck.x - paddle.x;
+  const finalDy = frame.puck.y - paddle.y;
+  const finalDistance = Math.hypot(finalDx, finalDy);
+  if (finalDistance < separation) {
+    let finalNx = finalDx;
+    let finalNy = finalDy;
+    let length = finalDistance;
+    if (length < 0.0001) {
+      finalNx = nx;
+      finalNy = ny;
+      length = 1;
+    }
+    frame.puck.x = paddle.x + (finalNx / length) * separation;
+    frame.puck.y = paddle.y + (finalNy / length) * separation;
+  }
 }
 
 function stepSimulation(simulation: Simulation, players: Player[], mode: Mode, dt: number) {
@@ -312,22 +362,29 @@ function stepSimulation(simulation: Simulation, players: Player[], mode: Mode, d
 
     for (const player of players) {
       const paddle = frame.paddles[player.userId];
-      collideContinuous(frame, oldPuck, oldPaddles[player.userId] ?? paddle, paddle, player.side);
+      collidePuckWithPaddle(frame, oldPuck, oldPaddles[player.userId] ?? paddle, paddle, player.side, stepDt);
     }
 
     const goalNow = frame.puck.y > GOAL_MIN && frame.puck.y < GOAL_MAX;
     if (goalNow && frame.puck.x < -0.01) {
       frame.rightScore += 1;
-      frame.puck = { x: 0.5, y: 0.5, vx: 0, vy: 0 };
-      frame.pauseUntil = Date.now() + 700;
+      if (frame.rightScore >= TARGET_SCORE) {
+        frame.winnerSide = "right";
+        frame.puck = { x: 0.5, y: 0.5, vx: 0, vy: 0 };
+        frame.pauseUntil = Date.now();
+      } else {
+        resetFaceoff(simulation, players, mode, "left");
+      }
     } else if (goalNow && frame.puck.x > 1.01) {
       frame.leftScore += 1;
-      frame.puck = { x: 0.5, y: 0.5, vx: 0, vy: 0 };
-      frame.pauseUntil = Date.now() + 700;
+      if (frame.leftScore >= TARGET_SCORE) {
+        frame.winnerSide = "left";
+        frame.puck = { x: 0.5, y: 0.5, vx: 0, vy: 0 };
+        frame.pauseUntil = Date.now();
+      } else {
+        resetFaceoff(simulation, players, mode, "right");
+      }
     }
-
-    if (frame.leftScore >= TARGET_SCORE) frame.winnerSide = "left";
-    if (frame.rightScore >= TARGET_SCORE) frame.winnerSide = "right";
   }
 }
 
@@ -382,6 +439,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
   const me = useMemo(() => game?.players.find((player) => player.userId === user.id) ?? null, [game, user.id]);
   const left = useMemo(() => game?.players.filter((player) => player.side === "left") ?? [], [game]);
   const right = useMemo(() => game?.players.filter((player) => player.side === "right") ?? [], [game]);
+  const rosterKey = useMemo(() => game?.players.map((player) => player.userId).join(",") ?? "", [game?.players]);
   const isHost = room.hostId === user.id;
   const needed = game?.mode === "2v2" ? 4 : 2;
   const online = room.members.filter((member) => member.online).length;
@@ -391,6 +449,16 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
     setGame(next);
     setError("");
   }, []);
+
+  const resetLocalToStart = useCallback((current: Game) => {
+    const own = current.players.find((player) => player.userId === user.id);
+    if (!own) return;
+    const paddle = initialPaddle(own, current.mode);
+    localInputRef.current = { x: paddle.x, y: paddle.y, vx: 0, vy: 0 };
+    localPaddleRef.current = { x: paddle.x, y: paddle.y };
+    lastInputRef.current = { x: paddle.x, y: paddle.y, at: performance.now() };
+    draggingRef.current = false;
+  }, [user.id]);
 
   const sendSignal = useCallback(async (targetId: string, kind: Signal["kind"], signalPayload: unknown) => {
     await post({ action: "hockeySignal", code: room.code, targetId, kind, payload: signalPayload });
@@ -425,6 +493,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
     const current = gameRef.current;
     const simulation = simulationRef.current;
     if (!current || !simulation || room.hostId !== user.id) return;
+    if (Date.now() < simulation.frame.pauseUntil) return;
     const player = current.players.find((entry) => entry.userId === senderId);
     if (!player || !payloadValue || typeof payloadValue !== "object") return;
     const value = payloadValue as Partial<InputPacket>;
@@ -439,9 +508,11 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
     const incoming = payloadValue as Frame;
     if (!incoming.puck || !incoming.paddles) return;
     const copy = cloneFrame(incoming);
+    const current = gameRef.current;
+    if (current && copy.pauseUntil > Date.now()) resetLocalToStart(current);
     remoteSnapshotRef.current = { frame: copy, receivedAt: performance.now() };
     if (room.hostId !== user.id) setFrame(copy);
-  }, [room.hostId, user.id]);
+  }, [resetLocalToStart, room.hostId, user.id]);
 
   const attachDataChannel = useCallback((peerId: string, channel: RTCDataChannel, hostSide: boolean) => {
     const entry = peersRef.current.get(peerId);
@@ -618,16 +689,10 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
     }
 
     signalCursorRef.current = 0;
-    const own = game.players.find((player) => player.userId === user.id);
-    if (own) {
-      const paddle = initialPaddle(own, game.mode);
-      localInputRef.current = { x: paddle.x, y: paddle.y, vx: 0, vy: 0 };
-      localPaddleRef.current = { x: paddle.x, y: paddle.y };
-      lastInputRef.current = { x: paddle.x, y: paddle.y, at: performance.now() };
-    }
+    resetLocalToStart(game);
 
     if (room.hostId === user.id) {
-      const key = `${game.mode}:${game.players.map((player) => player.userId).join(",")}`;
+      const key = `${game.mode}:${rosterKey}`;
       if (simulationRef.current?.key !== key) {
         const initialFrame = makeFrame(game.players, game.mode, game.leftScore, game.rightScore);
         simulationRef.current = {
@@ -645,7 +710,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
     } else if (!frame) {
       setFrame(makeFrame(game.players, game.mode, game.leftScore, game.rightScore));
     }
-  }, [game?.status, game?.mode, room.hostId, user.id, game?.players.map((player) => player.userId).join(",")]);
+  }, [closeAllPeers, game?.status, game?.mode, resetLocalToStart, room.hostId, rosterKey, user.id]);
 
   useEffect(() => () => closeAllPeers(), [closeAllPeers]);
 
@@ -707,10 +772,12 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
       const simulation = simulationRef.current;
       if (!current || !simulation || current.status === "lobby" || room.hostId !== user.id) return;
 
-      const local = localInputRef.current;
-      if (local) {
-        const own = current.players.find((player) => player.userId === user.id);
-        if (own) simulation.targets[user.id] = { ...local };
+      if (Date.now() >= simulation.frame.pauseUntil) {
+        const local = localInputRef.current;
+        if (local) {
+          const own = current.players.find((player) => player.userId === user.id);
+          if (own) simulation.targets[user.id] = { ...local };
+        }
       }
 
       const dt = clamp((now - simulation.lastTs) / 1000, 0.001, 0.032);
@@ -723,6 +790,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
       if (simulation.frame.leftScore !== simulation.lastCheckpointLeft || simulation.frame.rightScore !== simulation.lastCheckpointRight) {
         simulation.lastCheckpointLeft = simulation.frame.leftScore;
         simulation.lastCheckpointRight = simulation.frame.rightScore;
+        resetLocalToStart(current);
         checkpoint(simulation.frame.leftScore, simulation.frame.rightScore);
       }
 
@@ -754,7 +822,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
 
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [checkpoint, game?.status, room.hostId, sendSignal, user.id]);
+  }, [checkpoint, game?.status, resetLocalToStart, room.hostId, sendSignal, user.id]);
 
   useEffect(() => {
     if (!game || game.status === "lobby" || room.hostId === user.id) return;
@@ -805,6 +873,8 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
     if (!game || game.status !== "playing" || room.hostId === user.id) return;
     const id = window.setInterval(() => {
       if (!draggingRef.current || !localInputRef.current) return;
+      const snapshot = remoteSnapshotRef.current?.frame;
+      if (snapshot && Date.now() < snapshot.pauseUntil) return;
       sendRemoteInput(localInputRef.current, true);
     }, 28);
     return () => window.clearInterval(id);
@@ -814,6 +884,9 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
     const current = gameRef.current;
     const player = current?.players.find((entry) => entry.userId === user.id);
     if (!current || !player || current.status !== "playing") return;
+
+    const activeFrame = room.hostId === user.id ? simulationRef.current?.frame : remoteSnapshotRef.current?.frame;
+    if (activeFrame && Date.now() < activeFrame.pauseUntil) return;
 
     const point = clampPaddle(player.side, x, y);
     const now = performance.now();
@@ -844,6 +917,8 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
   };
 
   const pointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    const activeFrame = room.hostId === user.id ? simulationRef.current?.frame : remoteSnapshotRef.current?.frame;
+    if (activeFrame && Date.now() < activeFrame.pauseUntil) return;
     draggingRef.current = true;
     try { event.currentTarget.setPointerCapture(event.pointerId); } catch {}
     pointerPosition(event);
@@ -964,6 +1039,9 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
   const fallback = makeFrame(game.players, game.mode, game.leftScore, game.rightScore);
   const shown = frame ?? fallback;
   const winners = (shown.winnerSide === "left" ? left : right).map((player) => player.username).join(" & ");
+  const countdown = !shown.winnerSide && shown.pauseUntil > Date.now()
+    ? Math.max(1, Math.ceil((shown.pauseUntil - Date.now()) / 1000))
+    : 0;
 
   return <section className="hockeyGameWrap hockeyGameLive">
     <div className="hockeyGameTop hockeyScoreOnly">
@@ -1003,6 +1081,8 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
         })}
 
         <div className="hockeyPuck" style={{ left: `${shown.puck.x * 100}%`, top: `${shown.puck.y * 100}%`, transition: "none" }}/>
+
+        {countdown > 0 && <div className="hockeyCountdown"><b>{countdown}</b><span>REPRISE</span></div>}
 
         {shown.winnerSide && <div className="hockeyWinnerOverlay">
           <span>🏆</span>
