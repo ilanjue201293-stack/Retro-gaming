@@ -5,6 +5,7 @@ import RoomComms from "./RoomComms";
 import HockeyGame from "./HockeyGame";
 import PongGame from "./PongGame";
 import RpsGame from "./RpsGame";
+import DunkshotGame from "./DunkshotGame";
 
 type User = { id: string; username: string };
 type Friend = { id: string; username: string; online: boolean };
@@ -270,6 +271,7 @@ export default function RetroApp() {
             <HockeyGame room={room} user={user} onActiveChange={setHockeyActive}/>
             <PongGame room={room} user={user}/>
             <RpsGame room={room} user={user}/>
+            <DunkshotGame room={room} user={user}/>
           </section>
           <aside className="roomSide">
             <section className="panel">
@@ -305,7 +307,7 @@ export default function RetroApp() {
           <div className="actionCard"><span>⌁</span><h3>Rejoindre avec un code</h3><p>Entre le code à 5 caractères envoyé par un ami.</p><form onSubmit={(event) => { event.preventDefault(); void joinRoom(); }}><input className="codeInput" value={joinCode} maxLength={5} onChange={(event) => setJoinCode(event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ""))} placeholder="ABCDE"/><button className="secondaryButton" disabled={roomBusy || joinCode.length !== 5}>Rejoindre</button></form></div>
         </div>
         <section className="gamesPreview">
-          <div className="panelHead"><div><span className="kicker">JEUX</span><h2>Bibliothèque</h2></div><span className="availablePill">3 JEUX</span></div>
+          <div className="panelHead"><div><span className="kicker">JEUX</span><h2>Bibliothèque</h2></div><span className="availablePill">4 JEUX</span></div>
           <div className="gameLibraryCard">
             <div className="gameLibraryIcon">🏒</div>
             <div><small>ARCADE · MULTIJOUEUR</small><h3>Hockey Arcade</h3><p>Hockey vu du dessus avec palet physique. Joue en 1v1, 2v1 ou 2v2, choisis les équipes et complète avec des bots.</p></div>
@@ -319,6 +321,11 @@ export default function RetroApp() {
           <div className="gameLibraryCard">
             <div className="gameLibraryIcon rpsMiniIcon">✊ ✋ ✌️</div>
             <div><small>DUEL · 2 JOUEURS</small><h3>Pierre · Feuille · Ciseaux</h3><p>3 secondes pour choisir, puis Pierre, Feuille, Ciseaux et révélation simultanée.</p></div>
+            <button className="primaryButton" disabled={roomBusy} onClick={() => void createRoom()}>Créer une room</button>
+          </div>
+          <div className="gameLibraryCard">
+            <div className="gameLibraryIcon dunkMiniIcon">🏀</div>
+            <div><small>ARCADE · SOLO / 1V1</small><h3>Dunkshot</h3><p>Charge ton tir en tirant vers le bas, vise avec l'angle et enchaîne les paniers. Le panier devient mobile quand ta série monte.</p></div>
             <button className="primaryButton" disabled={roomBusy} onClick={() => void createRoom()}>Créer une room</button>
           </div>
         </section>

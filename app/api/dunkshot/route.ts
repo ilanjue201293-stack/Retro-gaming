@@ -212,7 +212,7 @@ export async function POST(req: NextRequest) {
         const power = Math.max(0, Math.min(1, Number(data.power) || 0));
         const aim = Math.max(-1, Math.min(1, Number(data.aim) || 0));
         if (power < 0.08) throw new Error("Tir trop faible.");
-        const shot: Shot = { id: makeId(), shooterId: user.id, power, aim, startedAt: Date.now() + 80 };
+        const shot: Shot = { id: makeId(), shooterId: user.id, power, aim, startedAt: Date.now() + 280 };
         await client.query(`update retro_dunkshot_games set shot=$1::jsonb,last_result=null,updated_at=now() where room_code=$2`, [JSON.stringify(shot), code]);
         await client.query("commit");
         return NextResponse.json({ ok: true, game: await state(code) });
