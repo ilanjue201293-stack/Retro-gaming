@@ -1,7 +1,7 @@
 import { scrypt as scryptCb, randomBytes, timingSafeEqual } from "crypto";
 import { promisify } from "util";
 import type { NextRequest, NextResponse } from "next/server";
-import { cleanup, db, ensureSchema } from "./db";
+import { db, ensureSchema } from "./db";
 import { makeId, makeToken, sha256 } from "./utils";
 
 const scrypt = promisify(scryptCb);
@@ -43,7 +43,7 @@ export function clearSessionCookie(response: NextResponse) {
 }
 
 export async function getAuthedUser(req: NextRequest): Promise<AuthUser | null> {
-  await cleanup();
+  await ensureSchema();
   const token = req.cookies.get(SESSION_COOKIE)?.value;
   if (!token) return null;
   const result = await db().query<{ id: string; username: string }>(
