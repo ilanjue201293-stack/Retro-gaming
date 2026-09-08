@@ -16,6 +16,9 @@ jobs:
         with:
           node-version: 22
       - run: python3 scripts/add_match_lobbies_teams.py
+      - name: Fix narrowed status checks
+        run: |
+          sed -i 's/focusSuppressed && game.status !== "lobby"/focusSuppressed/g' app/HockeyGame.tsx app/PongGame.tsx app/RpsGame.tsx
       - run: npm install
       - run: npm run typecheck
       - name: Commit changes
