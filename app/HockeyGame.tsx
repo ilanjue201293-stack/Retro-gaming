@@ -1,13 +1,13 @@
 "use client";
 
-import { PointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, PointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-type User = { id: string; username: string };
+type User = { id: string; username: string; avatarData?: string | null };
 type RoomMember = { id: string; username: string; online: boolean; joined_at: string };
 type Room = { code: string; hostId: string; members: RoomMember[] };
 type Mode = "1v1" | "2v2";
 type Side = "left" | "right";
-type Player = { userId: string; username: string; side: Side; slot: number };
+type Player = { userId: string; username: string; avatarData?: string | null; side: Side; slot: number };
 type Paddle = { x: number; y: number; vx: number; vy: number };
 type Puck = { x: number; y: number; vx: number; vy: number };
 type Frame = {
@@ -54,14 +54,16 @@ const ICE_SERVERS: RTCIceServer[] = [
 
 const PUCK_R = 0.024;
 const MALLET_R = 0.052;
+const CONTACT_MARGIN = 0.0035;
+const CONTACT_SEPARATION = 0.0015;
 const LEFT_BOARD = 0.03;
 const RIGHT_BOARD = 0.97;
 const TOP_BOARD = 0.045;
 const BOTTOM_BOARD = 0.955;
 const GOAL_MIN = 0.36;
 const GOAL_MAX = 0.64;
-const MAX_PUCK_SPEED = 0.82;
-const MAX_MALLET_SPEED = 1.35;
+const MAX_PUCK_SPEED = 2.1;
+const MAX_MALLET_SPEED = 2.4;
 const TARGET_SCORE = 7;
 
 const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
@@ -86,6 +88,54 @@ async function post(payload: Record<string, unknown>) {
   } finally {
     window.clearTimeout(timeout);
   }
+}
+
+async function postAuth(payload: Record<string, unknown>) {
+  const response = await fetch("/api/auth", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    cache: "no-store",
+  });
+  const data = await response.json();
+  if (!response.ok || !data.ok) throw new Error(data.error || "Erreur.");
+  return data;
+}
+
+function compressAvatar(file: File): Promise<string> {
+  if (!file.type.startsWith("image/")) return Promise.reject(new Error("Choisis une image."));
+  if (file.size > 8_000_000) return Promise.reject(new Error("Image trop lourde (8 Mo max)."));
+
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      try {
+        const size = 192;
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("Impossible de préparer l'image.");
+        const sourceSize = Math.min(image.naturalWidth, image.naturalHeight);
+        const sx = (image.naturalWidth - sourceSize) / 2;
+        const sy = (image.naturalHeight - sourceSize) / 2;
+        context.drawImage(image, sx, sy, sourceSize, sourceSize, 0, 0, size, size);
+        let result = canvas.toDataURL("image/jpeg", 0.82);
+        if (result.length > 210_000) result = canvas.toDataURL("image/jpeg", 0.65);
+        URL.revokeObjectURL(url);
+        resolve(result);
+      } catch (error) {
+        URL.revokeObjectURL(url);
+        reject(error);
+      }
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Impossible de lire cette image."));
+    };
+    image.src = url;
+  });
 }
 
 function initialPaddle(player: Player, mode: Mode): Paddle {
@@ -134,48 +184,72 @@ function makeFrame(players: Player[], mode: Mode, leftScore = 0, rightScore = 0)
   };
 }
 
-function collideSwept(frame: Frame, oldPaddle: Paddle, paddle: Paddle, side: Side) {
-  const sx = paddle.x - oldPaddle.x;
-  const sy = paddle.y - oldPaddle.y;
-  const segmentLengthSquared = sx * sx + sy * sy;
-  let closestX = paddle.x;
-  let closestY = paddle.y;
+function collideContinuous(frame: Frame, oldPuck: Puck, oldPaddle: Paddle, paddle: Paddle, side: Side) {
+  const radius = PUCK_R + MALLET_R + CONTACT_MARGIN;
+  const r0x = oldPuck.x - oldPaddle.x;
+  const r0y = oldPuck.y - oldPaddle.y;
+  const r1x = frame.puck.x - paddle.x;
+  const r1y = frame.puck.y - paddle.y;
+  const drx = r1x - r0x;
+  const dry = r1y - r0y;
 
-  if (segmentLengthSquared > 0.0000001) {
-    const t = clamp(
-      ((frame.puck.x - oldPaddle.x) * sx + (frame.puck.y - oldPaddle.y) * sy) / segmentLengthSquared,
-      0,
-      1
-    );
-    closestX = oldPaddle.x + sx * t;
-    closestY = oldPaddle.y + sy * t;
+  let hitT: number | null = null;
+  const startSquared = r0x * r0x + r0y * r0y;
+  if (startSquared <= radius * radius) {
+    hitT = 0;
+  } else {
+    const a = drx * drx + dry * dry;
+    const b = 2 * (r0x * drx + r0y * dry);
+    const c = startSquared - radius * radius;
+    if (a > 0.000000001) {
+      const discriminant = b * b - 4 * a * c;
+      if (discriminant >= 0) {
+        const root = Math.sqrt(discriminant);
+        const t1 = (-b - root) / (2 * a);
+        const t2 = (-b + root) / (2 * a);
+        if (t1 >= 0 && t1 <= 1) hitT = t1;
+        else if (t2 >= 0 && t2 <= 1) hitT = t2;
+      }
+    }
   }
 
-  let dx = frame.puck.x - closestX;
-  let dy = frame.puck.y - closestY;
-  let distance = Math.hypot(dx, dy);
-  const minimum = PUCK_R + MALLET_R;
-  if (distance >= minimum) return;
-
-  if (distance < 0.0001) {
-    dx = side === "left" ? 1 : -1;
-    dy = 0;
-    distance = 1;
+  const endDistance = Math.hypot(r1x, r1y);
+  if (hitT === null) {
+    if (endDistance > radius) return;
+    hitT = 1;
   }
 
-  const nx = dx / distance;
-  const ny = dy / distance;
-  frame.puck.x = paddle.x + nx * minimum;
-  frame.puck.y = paddle.y + ny * minimum;
-
-  const relative = (frame.puck.vx - paddle.vx) * nx + (frame.puck.vy - paddle.vy) * ny;
-  if (relative < 0) {
-    frame.puck.vx -= 1.55 * relative * nx;
-    frame.puck.vy -= 1.55 * relative * ny;
+  let impactX = r0x + drx * hitT;
+  let impactY = r0y + dry * hitT;
+  let impactDistance = Math.hypot(impactX, impactY);
+  if (impactDistance < 0.0001) {
+    impactX = side === "left" ? 1 : -1;
+    impactY = 0;
+    impactDistance = 1;
   }
 
-  frame.puck.vx += paddle.vx * 0.36 + nx * 0.03;
-  frame.puck.vy += paddle.vy * 0.36 + ny * 0.03;
+  const nx = impactX / impactDistance;
+  const ny = impactY / impactDistance;
+  const separation = PUCK_R + MALLET_R + CONTACT_SEPARATION;
+  frame.puck.x = paddle.x + nx * separation;
+  frame.puck.y = paddle.y + ny * separation;
+
+  const puckNormal = frame.puck.vx * nx + frame.puck.vy * ny;
+  const paddleNormal = paddle.vx * nx + paddle.vy * ny;
+  const closingSpeed = paddleNormal - puckNormal;
+
+  if (closingSpeed > 0.0005) {
+    const desiredNormal = paddleNormal + closingSpeed * 0.72;
+    const normalDelta = desiredNormal - puckNormal;
+    frame.puck.vx += normalDelta * nx;
+    frame.puck.vy += normalDelta * ny;
+
+    const tangentX = paddle.vx - paddleNormal * nx;
+    const tangentY = paddle.vy - paddleNormal * ny;
+    frame.puck.vx += tangentX * 0.12;
+    frame.puck.vy += tangentY * 0.12;
+  }
+
   const velocity = capVelocity(frame.puck.vx, frame.puck.vy, MAX_PUCK_SPEED);
   frame.puck.vx = velocity.x;
   frame.puck.vy = velocity.y;
@@ -183,7 +257,7 @@ function collideSwept(frame: Frame, oldPaddle: Paddle, paddle: Paddle, side: Sid
 
 function stepSimulation(simulation: Simulation, players: Player[], mode: Mode, dt: number) {
   const frame = simulation.frame;
-  const steps = Math.max(1, Math.min(8, Math.ceil(dt / 0.006)));
+  const steps = Math.max(1, Math.min(10, Math.ceil(dt / 0.0045)));
   const stepDt = dt / steps;
 
   for (let step = 0; step < steps; step++) {
@@ -210,6 +284,7 @@ function stepSimulation(simulation: Simulation, players: Player[], mode: Mode, d
 
     if (frame.winnerSide || Date.now() < frame.pauseUntil) continue;
 
+    const oldPuck = { ...frame.puck };
     frame.puck.x += frame.puck.vx * stepDt;
     frame.puck.y += frame.puck.vy * stepDt;
     const friction = Math.pow(0.994, stepDt * 60);
@@ -237,14 +312,15 @@ function stepSimulation(simulation: Simulation, players: Player[], mode: Mode, d
 
     for (const player of players) {
       const paddle = frame.paddles[player.userId];
-      collideSwept(frame, oldPaddles[player.userId] ?? paddle, paddle, player.side);
+      collideContinuous(frame, oldPuck, oldPaddles[player.userId] ?? paddle, paddle, player.side);
     }
 
-    if (inGoalMouth && frame.puck.x < -0.01) {
+    const goalNow = frame.puck.y > GOAL_MIN && frame.puck.y < GOAL_MAX;
+    if (goalNow && frame.puck.x < -0.01) {
       frame.rightScore += 1;
       frame.puck = { x: 0.5, y: 0.5, vx: 0, vy: 0 };
       frame.pauseUntil = Date.now() + 700;
-    } else if (inGoalMouth && frame.puck.x > 1.01) {
+    } else if (goalNow && frame.puck.x > 1.01) {
       frame.leftScore += 1;
       frame.puck = { x: 0.5, y: 0.5, vx: 0, vy: 0 };
       frame.pauseUntil = Date.now() + 700;
@@ -283,6 +359,8 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [frame, setFrame] = useState<Frame | null>(null);
+  const [avatarData, setAvatarData] = useState<string | null>(user.avatarData ?? null);
+  const [avatarBusy, setAvatarBusy] = useState(false);
 
   const gameRef = useRef<Game | null>(null);
   const rinkRef = useRef<HTMLDivElement | null>(null);
@@ -629,15 +707,15 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
       const simulation = simulationRef.current;
       if (!current || !simulation || current.status === "lobby" || room.hostId !== user.id) return;
 
-      const dt = clamp((now - simulation.lastTs) / 1000, 0.001, 0.032);
-      simulation.lastTs = now;
-      stepSimulation(simulation, current.players, current.mode, dt);
-
       const local = localInputRef.current;
       if (local) {
         const own = current.players.find((player) => player.userId === user.id);
         if (own) simulation.targets[user.id] = { ...local };
       }
+
+      const dt = clamp((now - simulation.lastTs) / 1000, 0.001, 0.032);
+      simulation.lastTs = now;
+      stepSimulation(simulation, current.players, current.mode, dt);
 
       const rendered = cloneFrame(simulation.frame);
       setFrame(rendered);
@@ -739,7 +817,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
 
     const point = clampPaddle(player.side, x, y);
     const now = performance.now();
-    const dt = Math.max(0.012, (now - lastInputRef.current.at) / 1000);
+    const dt = Math.max(0.008, (now - lastInputRef.current.at) / 1000);
     let vx = (point.x - lastInputRef.current.x) / dt;
     let vy = (point.y - lastInputRef.current.y) / dt;
     const velocity = capVelocity(vx, vy, MAX_MALLET_SPEED);
@@ -785,6 +863,36 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
     } catch {}
   };
 
+  const uploadAvatar = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      setAvatarBusy(true);
+      setError("");
+      const prepared = await compressAvatar(file);
+      const data = await postAuth({ action: "avatar", avatarData: prepared });
+      setAvatarData(data.user?.avatarData ?? prepared);
+    } catch (avatarError) {
+      setError(avatarError instanceof Error ? avatarError.message : "Impossible d'enregistrer la photo.");
+    } finally {
+      setAvatarBusy(false);
+    }
+  };
+
+  const removeAvatar = async () => {
+    try {
+      setAvatarBusy(true);
+      setError("");
+      await postAuth({ action: "avatar", avatarData: null });
+      setAvatarData(null);
+    } catch (avatarError) {
+      setError(avatarError instanceof Error ? avatarError.message : "Impossible de retirer la photo.");
+    } finally {
+      setAvatarBusy(false);
+    }
+  };
+
   const configure = async (mode: Mode) => {
     try {
       setBusy(true);
@@ -827,6 +935,22 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
         <button className={game.mode === "1v1" ? "selected" : ""} disabled={!isHost || busy} onClick={() => void configure("1v1")}><strong>1 VS 1</strong><small>2 joueurs</small></button>
         <button className={game.mode === "2v2" ? "selected" : ""} disabled={!isHost || busy} onClick={() => void configure("2v2")}><strong>2 VS 2</strong><small>4 joueurs</small></button>
       </div>
+
+      <div className="hockeyAvatarSetup">
+        <div className="hockeyAvatarPreview">
+          {avatarData ? <img src={avatarData} alt="Photo du joueur"/> : <span>{user.username.slice(0, 2).toUpperCase()}</span>}
+        </div>
+        <div className="hockeyAvatarCopy">
+          <strong>Photo sur ton rond</strong>
+          <small>Elle sera visible par tous pendant le match.</small>
+        </div>
+        <label className={`hockeyAvatarButton ${avatarBusy ? "disabled" : ""}`}>
+          {avatarBusy ? "Préparation…" : avatarData ? "Changer" : "Choisir une photo"}
+          <input type="file" accept="image/*" disabled={avatarBusy} onChange={(event) => void uploadAvatar(event)}/>
+        </label>
+        {avatarData && <button className="hockeyAvatarRemove" disabled={avatarBusy} onClick={() => void removeAvatar()}>Retirer</button>}
+      </div>
+
       <div className="hockeyReadyBar">
         <span>{online}/{needed} joueurs connectés</span>
         {isHost
@@ -870,11 +994,12 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
           const paddle = player.userId === user.id && localPaddleRef.current
             ? { ...serverPaddle, ...localPaddleRef.current }
             : serverPaddle;
+          const picture = player.userId === user.id ? (avatarData ?? player.avatarData) : player.avatarData;
           return <div
             key={player.userId}
-            className={`hockeyMallet ${player.side} ${player.userId === user.id ? "mine" : ""}`}
+            className={`hockeyMallet ${player.side} ${player.userId === user.id ? "mine" : ""} ${picture ? "hasPhoto" : ""}`}
             style={{ left: `${paddle.x * 100}%`, top: `${paddle.y * 100}%`, transition: "none" }}
-          ><span>{player.username.slice(0, 2).toUpperCase()}</span></div>;
+          >{picture ? <img src={picture} alt={player.username}/> : <span>{player.username.slice(0, 2).toUpperCase()}</span>}</div>;
         })}
 
         <div className="hockeyPuck" style={{ left: `${shown.puck.x * 100}%`, top: `${shown.puck.y * 100}%`, transition: "none" }}/>
