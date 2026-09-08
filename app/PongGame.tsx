@@ -25,6 +25,9 @@ type Game = {
   rightScore: number;
   winnerSide: Side | null;
   targetScore: number;
+  timeLimitSec: number;
+  startedAt: number | null;
+  endsAt: number | null;
 };
 type Signal = { id: number; senderId: string; kind: "offer" | "answer" | "ice" | "input" | "state"; payload: unknown };
 type PeerEntry = { pc: RTCPeerConnection; dc: RTCDataChannel | null };
@@ -36,13 +39,13 @@ type Simulation = {
   lastFallbackBroadcast: number;
   lastCheckpointLeft: number;
   lastCheckpointRight: number;
+  timeoutResolved: boolean;
 };
 
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
 ];
-
 const PADDLE_X_LEFT = 0.055;
 const PADDLE_X_RIGHT = 0.945;
 const PADDLE_W = 0.021;
@@ -50,11 +53,14 @@ const PADDLE_H = 0.17;
 const BALL_R = 0.014;
 const BASE_SPEED = 0.68;
 const MAX_SPEED = 1.16;
-const TARGET_SCORE = 7;
 const POINT_PAUSE = 900;
+const SCORE_OPTIONS = [3, 5, 7, 10, 15];
+const TIME_OPTIONS = [0, 60, 120, 180, 300, 600];
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const clampPaddleY = (y: number) => clamp(y, PADDLE_H / 2 + 0.025, 1 - PADDLE_H / 2 - 0.025);
+const timeLabel = (seconds: number) => seconds === 0 ? "Sans limite" : seconds < 60 ? `${seconds}s` : `${seconds / 60} min`;
+const formatClock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.max(0, seconds % 60)).padStart(2, "0")}`;
 
 async function post(payload: Record<string, unknown>) {
   const controller = new AbortController();
@@ -116,7 +122,7 @@ function launchServe(frame: Frame) {
   if (frame.winnerSide || Date.now() < frame.pauseUntil) return;
   if (Math.abs(frame.ball.vx) > 0.001 || Math.abs(frame.ball.vy) > 0.001) return;
   frame.ball.vx = frame.serveDir * BASE_SPEED;
-  frame.ball.vy = (Math.random() * 0.34 - 0.17);
+  frame.ball.vy = Math.random() * 0.34 - 0.17;
 }
 
 function bounceFromPaddle(frame: Frame, player: Player, paddle: Paddle) {
@@ -130,7 +136,7 @@ function bounceFromPaddle(frame: Frame, player: Player, paddle: Paddle) {
   ball.vy = vy;
 }
 
-function stepSimulation(simulation: Simulation, players: Player[], dt: number) {
+function stepSimulation(simulation: Simulation, players: Player[], dt: number, targetScore: number, suddenDeath: boolean) {
   const frame = simulation.frame;
   const steps = Math.max(1, Math.min(6, Math.ceil(dt / 0.006)));
   const stepDt = dt / steps;
@@ -197,7 +203,7 @@ function stepSimulation(simulation: Simulation, players: Player[], dt: number) {
 
     if (frame.ball.x < -BALL_R) {
       frame.rightScore += 1;
-      if (frame.rightScore >= TARGET_SCORE) {
+      if (frame.rightScore >= targetScore || suddenDeath) {
         frame.winnerSide = "right";
         frame.ball = { x: 0.5, y: 0.5, vx: 0, vy: 0 };
       } else {
@@ -206,7 +212,7 @@ function stepSimulation(simulation: Simulation, players: Player[], dt: number) {
       }
     } else if (frame.ball.x > 1 + BALL_R) {
       frame.leftScore += 1;
-      if (frame.leftScore >= TARGET_SCORE) {
+      if (frame.leftScore >= targetScore || suddenDeath) {
         frame.winnerSide = "left";
         frame.ball = { x: 0.5, y: 0.5, vx: 0, vy: 0 };
       } else {
@@ -232,6 +238,7 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
   const [frame, setFrame] = useState<Frame | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [clock, setClock] = useState(Date.now());
 
   const gameRef = useRef<Game | null>(null);
   const simulationRef = useRef<Simulation | null>(null);
@@ -248,6 +255,11 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
   const keysRef = useRef({ up: false, down: false });
 
   useEffect(() => { gameRef.current = game; }, [game]);
+  useEffect(() => {
+    if (!game || game.status === "lobby" || !game.endsAt) return;
+    const id = window.setInterval(() => setClock(Date.now()), 200);
+    return () => window.clearInterval(id);
+  }, [game?.status, game?.endsAt]);
 
   const isHost = room.hostId === user.id;
   const me = useMemo(() => game?.players.find((player) => player.userId === user.id) ?? null, [game, user.id]);
@@ -289,10 +301,8 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
     if (!current || !simulation || room.hostId !== user.id || !payload || typeof payload !== "object") return;
     const player = current.players.find((entry) => entry.userId === senderId);
     if (!player) return;
-    const value = payload as { y?: unknown };
-    const y = Number(value.y);
-    if (!Number.isFinite(y)) return;
-    simulation.targets[senderId] = clampPaddleY(y);
+    const y = Number((payload as { y?: unknown }).y);
+    if (Number.isFinite(y)) simulation.targets[senderId] = clampPaddleY(y);
   }, [room.hostId, user.id]);
 
   const receiveState = useCallback((payload: unknown) => {
@@ -357,18 +367,14 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
       const offer = await entry.pc.createOffer();
       await entry.pc.setLocalDescription(offer);
       await sendSignal(peerId, "offer", offer);
-    } catch {
-      closePeer(peerId);
-    } finally {
-      window.setTimeout(() => reconnectingRef.current.delete(peerId), 600);
-    }
+    } catch { closePeer(peerId); }
+    finally { window.setTimeout(() => reconnectingRef.current.delete(peerId), 600); }
   }, [attachDataChannel, closePeer, makePeer, sendSignal, user.id]);
 
   const handleSignal = useCallback(async (signal: Signal) => {
     const current = gameRef.current;
     if (!current || current.status === "lobby") return;
     const hostId = room.hostId;
-
     if (signal.kind === "input") {
       if (user.id === hostId) receiveInput(signal.senderId, signal.payload);
       return;
@@ -377,27 +383,18 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
       if (user.id !== hostId && signal.senderId === hostId) receiveState(signal.payload);
       return;
     }
-
     if (user.id === hostId) {
       const entry = peersRef.current.get(signal.senderId);
       if (signal.kind === "answer" && entry) {
-        try {
-          await entry.pc.setRemoteDescription(signal.payload as RTCSessionDescriptionInit);
-          await flushIce(signal.senderId, entry.pc);
-        } catch { closePeer(signal.senderId); }
+        try { await entry.pc.setRemoteDescription(signal.payload as RTCSessionDescriptionInit); await flushIce(signal.senderId, entry.pc); }
+        catch { closePeer(signal.senderId); }
       } else if (signal.kind === "ice") {
         const candidate = signal.payload as RTCIceCandidateInit;
-        if (entry?.pc.remoteDescription) {
-          try { await entry.pc.addIceCandidate(candidate); } catch {}
-        } else {
-          const queue = pendingIceRef.current.get(signal.senderId) ?? [];
-          queue.push(candidate);
-          pendingIceRef.current.set(signal.senderId, queue);
-        }
+        if (entry?.pc.remoteDescription) { try { await entry.pc.addIceCandidate(candidate); } catch {} }
+        else { const queue = pendingIceRef.current.get(signal.senderId) ?? []; queue.push(candidate); pendingIceRef.current.set(signal.senderId, queue); }
       }
       return;
     }
-
     if (signal.senderId !== hostId) return;
     if (signal.kind === "offer") {
       try {
@@ -412,13 +409,8 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
     } else if (signal.kind === "ice") {
       const entry = peersRef.current.get(hostId);
       const candidate = signal.payload as RTCIceCandidateInit;
-      if (entry?.pc.remoteDescription) {
-        try { await entry.pc.addIceCandidate(candidate); } catch {}
-      } else {
-        const queue = pendingIceRef.current.get(hostId) ?? [];
-        queue.push(candidate);
-        pendingIceRef.current.set(hostId, queue);
-      }
+      if (entry?.pc.remoteDescription) { try { await entry.pc.addIceCandidate(candidate); } catch {} }
+      else { const queue = pendingIceRef.current.get(hostId) ?? []; queue.push(candidate); pendingIceRef.current.set(hostId, queue); }
     }
   }, [closePeer, flushIce, makePeer, receiveInput, receiveState, room.hostId, sendSignal, user.id]);
 
@@ -460,7 +452,6 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
       setFrame(null);
       return;
     }
-
     signalCursorRef.current = 0;
     localYRef.current = 0.5;
     if (isHost) {
@@ -473,11 +464,10 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
         lastFallbackBroadcast: 0,
         lastCheckpointLeft: game.leftScore,
         lastCheckpointRight: game.rightScore,
+        timeoutResolved: false,
       };
       setFrame(cloneFrame(initial));
-    } else {
-      setFrame(makeFrame(game.players, game.leftScore, game.rightScore));
-    }
+    } else setFrame(makeFrame(game.players, game.leftScore, game.rightScore));
   }, [closeAllPeers, game?.status, isHost, rosterKey]);
 
   useEffect(() => () => closeAllPeers(), [closeAllPeers]);
@@ -512,8 +502,8 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
     return () => window.clearInterval(id);
   }, [game?.status, isHost, startHostPeer, user.id]);
 
-  const checkpoint = useCallback((leftScore: number, rightScore: number) => {
-    void post({ action: "checkpoint", code: room.code, leftScore, rightScore }).catch(() => undefined);
+  const checkpoint = useCallback((leftScore: number, rightScore: number, winnerSide?: Side | null) => {
+    void post({ action: "checkpoint", code: room.code, leftScore, rightScore, winnerSide: winnerSide ?? null }).catch(() => undefined);
   }, [room.code]);
 
   useEffect(() => {
@@ -523,18 +513,33 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
       const current = gameRef.current;
       const simulation = simulationRef.current;
       if (!current || !simulation || current.status === "lobby") return;
+
       const own = current.players.find((player) => player.userId === user.id);
       if (own) simulation.targets[user.id] = localYRef.current;
+
+      let suddenDeath = false;
+      if (!simulation.frame.winnerSide && current.endsAt && Date.now() >= current.endsAt) {
+        if (simulation.frame.leftScore !== simulation.frame.rightScore) {
+          simulation.frame.winnerSide = simulation.frame.leftScore > simulation.frame.rightScore ? "left" : "right";
+          if (!simulation.timeoutResolved) {
+            simulation.timeoutResolved = true;
+            checkpoint(simulation.frame.leftScore, simulation.frame.rightScore, simulation.frame.winnerSide);
+          }
+        } else {
+          suddenDeath = true;
+        }
+      }
+
       const dt = clamp((now - simulation.lastTs) / 1000, 0.001, 0.032);
       simulation.lastTs = now;
-      stepSimulation(simulation, current.players, dt);
+      stepSimulation(simulation, current.players, dt, current.targetScore, suddenDeath);
       setFrame(cloneFrame(simulation.frame));
 
       if (simulation.frame.leftScore !== simulation.lastCheckpointLeft || simulation.frame.rightScore !== simulation.lastCheckpointRight) {
         simulation.lastCheckpointLeft = simulation.frame.leftScore;
         simulation.lastCheckpointRight = simulation.frame.rightScore;
         localYRef.current = 0.5;
-        checkpoint(simulation.frame.leftScore, simulation.frame.rightScore);
+        checkpoint(simulation.frame.leftScore, simulation.frame.rightScore, simulation.frame.winnerSide);
       }
 
       if (now - simulation.lastBroadcast >= 33) {
@@ -543,19 +548,14 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
         for (const player of current.players) {
           if (player.userId === user.id) continue;
           const channel = peersRef.current.get(player.userId)?.dc;
-          if (channel?.readyState === "open") {
-            try { channel.send(message); } catch {}
-          }
+          if (channel?.readyState === "open") { try { channel.send(message); } catch {} }
         }
       }
-
       if (now - simulation.lastFallbackBroadcast >= 170) {
         simulation.lastFallbackBroadcast = now;
         for (const player of current.players) {
           if (player.userId === user.id) continue;
-          if (peersRef.current.get(player.userId)?.dc?.readyState !== "open") {
-            void sendSignal(player.userId, "state", simulation.frame).catch(() => undefined);
-          }
+          if (peersRef.current.get(player.userId)?.dc?.readyState !== "open") void sendSignal(player.userId, "state", simulation.frame).catch(() => undefined);
         }
       }
       raf = requestAnimationFrame(tick);
@@ -609,10 +609,8 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
 
   const pointerY = (event: PointerEvent<HTMLDivElement>) => {
     const rect = courtRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    movePaddle((event.clientY - rect.top) / rect.height);
+    if (rect) movePaddle((event.clientY - rect.top) / rect.height);
   };
-
   const pointerDown = (event: PointerEvent<HTMLDivElement>) => {
     draggingRef.current = true;
     try { event.currentTarget.setPointerCapture(event.pointerId); } catch {}
@@ -665,35 +663,43 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
     return () => window.clearInterval(id);
   }, [game?.status, isHost, sendInput]);
 
+  const configure = async (targetScore: number, timeLimitSec: number) => {
+    try {
+      setBusy(true); setError("");
+      const data = await post({ action: "configure", code: room.code, targetScore, timeLimitSec });
+      gameRef.current = data.game as Game;
+      setGame(data.game as Game);
+    } catch (actionError) { setError(actionError instanceof Error ? actionError.message : "Impossible de régler Pong."); }
+    finally { setBusy(false); }
+  };
+
   const start = async () => {
     try {
-      setBusy(true);
-      setError("");
-      closeAllPeers();
-      signalCursorRef.current = 0;
+      setBusy(true); setError(""); closeAllPeers(); signalCursorRef.current = 0;
       const data = await post({ action: "start", code: room.code });
       gameRef.current = data.game as Game;
       setGame(data.game as Game);
-    } catch (startError) {
-      setError(startError instanceof Error ? startError.message : "Impossible de lancer Pong.");
-    } finally {
-      setBusy(false);
-    }
+      setClock(Date.now());
+    } catch (startError) { setError(startError instanceof Error ? startError.message : "Impossible de lancer Pong."); }
+    finally { setBusy(false); }
   };
 
-  if (!game) {
-    return <section className="pongLobby"><div className="spinner"/><p>Chargement de Pong…</p>{error && <div className="errorBox">{error}</div>}</section>;
-  }
+  if (!game) return <section className="pongLobby"><div className="spinner"/><p>Chargement de Pong…</p>{error && <div className="errorBox">{error}</div>}</section>;
 
   if (game.status === "lobby") {
-    return <section className="pongLobby">
-      <div className="pongLobbyIcon">▮ · ▮</div>
-      <div className="pongLobbyCopy"><span className="kicker">CLASSIQUE · 2 JOUEURS</span><h2>Pong</h2><p>Le Pong original : une raquette de chaque côté, une balle carrée, premier à 7.</p></div>
+    return <section className="pongLobby pongLobbyWithSettings">
+      <div className="pongLobbyIcon"><span className="pongIconPaddle"/><i/><span className="pongIconPaddle"/></div>
+      <div className="pongLobbyCopy">
+        <span className="kicker">CLASSIQUE · 2 JOUEURS</span><h2>Pong</h2>
+        <p>Le Pong original : deux raquettes, une balle carrée et un duel en 1 contre 1.</p>
+        <div className="pongSettings">
+          <label><small>Points pour gagner</small><select value={game.targetScore} disabled={!isHost || busy} onChange={(event) => void configure(Number(event.target.value), game.timeLimitSec)}>{SCORE_OPTIONS.map((score) => <option key={score} value={score}>{score} points</option>)}</select></label>
+          <label><small>Temps imparti</small><select value={game.timeLimitSec} disabled={!isHost || busy} onChange={(event) => void configure(game.targetScore, Number(event.target.value))}>{TIME_OPTIONS.map((seconds) => <option key={seconds} value={seconds}>{timeLabel(seconds)}</option>)}</select></label>
+        </div>
+      </div>
       <div className="pongReady">
         <span>{online}/2 joueurs connectés</span>
-        {isHost
-          ? <button className="primaryButton" disabled={busy || online !== 2} onClick={() => void start()}>{busy ? "Lancement…" : "Lancer Pong"}</button>
-          : <small>En attente de l'hôte…</small>}
+        {isHost ? <button className="primaryButton" disabled={busy || online !== 2} onClick={() => void start()}>{busy ? "Lancement…" : "Lancer Pong"}</button> : <small>En attente de l'hôte…</small>}
       </div>
       {error && <div className="errorBox">{error}</div>}
     </section>;
@@ -705,27 +711,18 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
   const leftPaddle = left ? shown.paddles[left.userId] ?? { y: 0.5, vy: 0 } : { y: 0.5, vy: 0 };
   const rightPaddle = right ? shown.paddles[right.userId] ?? { y: 0.5, vy: 0 } : { y: 0.5, vy: 0 };
   const winner = shown.winnerSide === "left" ? left?.username : shown.winnerSide === "right" ? right?.username : "";
+  const remaining = game.endsAt ? Math.max(0, Math.ceil((game.endsAt - clock) / 1000)) : null;
+  const suddenDeath = remaining === 0 && !shown.winnerSide && shown.leftScore === shown.rightScore;
 
   return <section className="pongGameWrap">
-    <div
-      ref={courtRef}
-      className={`pongCourt ${me ? "controllable" : "spectating"}`}
-      onPointerDown={pointerDown}
-      onPointerMove={pointerMove}
-      onPointerUp={pointerUp}
-      onPointerCancel={pointerUp}
-      onLostPointerCapture={() => { draggingRef.current = false; }}
-    >
+    <div className="pongMatchMeta"><span>Premier à {game.targetScore}</span>{remaining !== null && <strong className={suddenDeath ? "sudden" : ""}>{suddenDeath ? "MORT SUBITE" : formatClock(remaining)}</strong>}</div>
+    <div ref={courtRef} className={`pongCourt ${me ? "controllable" : "spectating"}`} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp} onLostPointerCapture={() => { draggingRef.current = false; }}>
       <div className="pongCenterLine"/>
       <div className="pongScore"><b>{shown.leftScore}</b><b>{shown.rightScore}</b></div>
       <div className="pongPaddle pongPaddleLeft" style={{ top: `${leftPaddle.y * 100}%` }}/>
       <div className="pongPaddle pongPaddleRight" style={{ top: `${rightPaddle.y * 100}%` }}/>
       <div className="pongBall" style={{ left: `${shown.ball.x * 100}%`, top: `${shown.ball.y * 100}%` }}/>
-      {shown.winnerSide && <div className="pongWinner">
-        <strong>{winner || "Joueur"} gagne</strong>
-        <span>{shown.leftScore} — {shown.rightScore}</span>
-        {isHost && <button onClick={() => void start()}>Rejouer</button>}
-      </div>}
+      {shown.winnerSide && <div className="pongWinner"><strong>{winner || "Joueur"} gagne</strong><span>{shown.leftScore} — {shown.rightScore}</span>{isHost && <button onClick={() => void start()}>Rejouer</button>}</div>}
     </div>
     <div className="pongControlsHint">Glisse verticalement · clavier : ↑ ↓ ou W S</div>
     {error && <div className="errorBox">{error}</div>}
