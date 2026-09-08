@@ -28,6 +28,7 @@ type Row = {
 };
 
 const CHOICE_MS = 3000;
+const CHOICE_NETWORK_GRACE_MS = 650;
 const CHANT_MS = 2100;
 const REVEAL_MS = 1800;
 const VALID_CHOICES = new Set<Choice>(["rock", "paper", "scissors"]);
@@ -159,7 +160,8 @@ async function advance(code: string) {
 
     const now = Date.now();
     const deadline = row.phase_ends_at ? new Date(row.phase_ends_at).getTime() : 0;
-    if (!deadline || now < deadline) {
+    const effectiveDeadline = row.phase === "choosing" ? deadline + CHOICE_NETWORK_GRACE_MS : deadline;
+    if (!deadline || now < effectiveDeadline) {
       await client.query("commit");
       return row;
     }
@@ -176,8 +178,8 @@ async function advance(code: string) {
       choices[players[0].userId] ||= randomChoice();
       choices[players[1].userId] ||= randomChoice();
       await client.query(
-        `update retro_rps_games set choices=$1::jsonb,phase='chant',phase_started_at=now(),phase_ends_at=now()+interval '2100 milliseconds',updated_at=now() where room_code=$2`,
-        [JSON.stringify(choices), code]
+        `update retro_rps_games set choices=$1::jsonb,phase='chant',phase_started_at=now(),phase_ends_at=now()+($2 * interval '1 millisecond'),updated_at=now() where room_code=$3`,
+        [JSON.stringify(choices), CHANT_MS, code]
       );
     } else if (row.phase === "chant") {
       const choices = parseChoices(row.choices);
@@ -189,9 +191,9 @@ async function advance(code: string) {
       const lastResult: LastResult = { leftChoice, rightChoice, winnerSide: winner };
       await client.query(
         `update retro_rps_games set left_score=$1,right_score=$2,round_index=round_index+1,last_result=$3::jsonb,
-         phase='reveal',phase_started_at=now(),phase_ends_at=now()+interval '1800 milliseconds',updated_at=now()
-         where room_code=$4`,
-        [leftScore, rightScore, JSON.stringify(lastResult), code]
+         phase='reveal',phase_started_at=now(),phase_ends_at=now()+($4 * interval '1 millisecond'),updated_at=now()
+         where room_code=$5`,
+        [leftScore, rightScore, JSON.stringify(lastResult), REVEAL_MS, code]
       );
     } else if (row.phase === "reveal") {
       if (row.round_index >= row.rounds_total) {
@@ -202,14 +204,59 @@ async function advance(code: string) {
         );
       } else {
         await client.query(
-          `update retro_rps_games set choices='{}'::jsonb,last_result=null,phase='choosing',phase_started_at=now(),phase_ends_at=now()+interval '3 seconds',updated_at=now() where room_code=$1`,
-          [code]
+          `update retro_rps_games set choices='{}'::jsonb,last_result=null,phase='choosing',phase_started_at=now(),phase_ends_at=now()+($2 * interval '1 millisecond'),updated_at=now() where room_code=$1`,
+          [code, CHOICE_MS]
         );
       }
     }
 
     await client.query("commit");
     return await getRow(code);
+  } catch (error) {
+    try { await client.query("rollback"); } catch {}
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function recordChoice(code: string, userId: string, choice: Choice) {
+  await ensureGame(code);
+  const client = await db().connect();
+  try {
+    await client.query("begin");
+    const locked = await client.query<Row>(
+      `select room_code,status,players,rounds_total,round_index,left_score,right_score,choices,phase,
+              phase_started_at::text,phase_ends_at::text,last_result,winner_side
+       from retro_rps_games where room_code=$1 for update`,
+      [code]
+    );
+    const row = locked.rows[0];
+    if (!row) throw new Error("Pierre-Feuille-Ciseaux indisponible.");
+    const players = parsePlayers(row.players);
+    if (!players.some((player) => player.userId === userId)) throw new Error("Tu ne joues pas cette partie.");
+
+    // Un clic reçu juste après 0 s peut être arrivé à temps côté joueur mais subir
+    // quelques centaines de ms de réseau. On lui laisse donc une petite marge.
+    const deadline = row.phase_ends_at ? new Date(row.phase_ends_at).getTime() : 0;
+    const stillAccepting = row.status === "playing" && row.phase === "choosing" && (!deadline || Date.now() <= deadline + CHOICE_NETWORK_GRACE_MS);
+    if (!stillAccepting) {
+      await client.query("commit");
+      return row;
+    }
+
+    // JSONB concatène la nouvelle clé sans relire/réécrire les choix de l'autre joueur.
+    // Avec le verrou de ligne, deux clics simultanés ne peuvent plus s'écraser.
+    const updated = await client.query<Row>(
+      `update retro_rps_games
+       set choices=coalesce(choices,'{}'::jsonb) || jsonb_build_object($2::text,$3::text),updated_at=now()
+       where room_code=$1
+       returning room_code,status,players,rounds_total,round_index,left_score,right_score,choices,phase,
+                 phase_started_at::text,phase_ends_at::text,last_result,winner_side`,
+      [code, userId, choice]
+    );
+    await client.query("commit");
+    return updated.rows[0] ?? row;
   } catch (error) {
     try { await client.query("rollback"); } catch {}
     throw error;
@@ -278,9 +325,9 @@ export async function POST(req: NextRequest) {
       ];
       await db().query(
         `update retro_rps_games set status='playing',players=$1::jsonb,round_index=0,left_score=0,right_score=0,
-         choices='{}'::jsonb,phase='choosing',phase_started_at=now(),phase_ends_at=now()+interval '3 seconds',last_result=null,winner_side=null,updated_at=now()
-         where room_code=$2`,
-        [JSON.stringify(players), code]
+         choices='{}'::jsonb,phase='choosing',phase_started_at=now(),phase_ends_at=now()+($2 * interval '1 millisecond'),last_result=null,winner_side=null,updated_at=now()
+         where room_code=$3`,
+        [JSON.stringify(players), CHOICE_MS, code]
       );
       return NextResponse.json({ ok: true, game: output(await getRow(code), user.id) });
     }
@@ -288,15 +335,8 @@ export async function POST(req: NextRequest) {
     if (action === "choose") {
       const choice = String(data.choice ?? "") as Choice;
       if (!VALID_CHOICES.has(choice)) throw new Error("Choix invalide.");
-      const row = await advance(code);
-      if (row.status !== "playing" || row.phase !== "choosing") throw new Error("La phase de choix est terminée.");
-      const players = parsePlayers(row.players);
-      if (!players.some((player) => player.userId === user.id)) throw new Error("Tu ne joues pas cette partie.");
-      const choices = parseChoices(row.choices);
-      choices[user.id] = choice;
-      await db().query(`update retro_rps_games set choices=$1::jsonb,updated_at=now() where room_code=$2`, [JSON.stringify(choices), code]);
-      const next = await getRow(code);
-      return NextResponse.json({ ok: true, game: output(next, user.id) });
+      const row = await recordChoice(code, user.id, choice);
+      return NextResponse.json({ ok: true, game: output(row, user.id) });
     }
 
     if (action === "stop") {
