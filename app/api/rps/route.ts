@@ -8,8 +8,9 @@ export const dynamic = "force-dynamic";
 
 type Side = "left" | "right";
 type Choice = "rock" | "paper" | "scissors";
+type BotDifficulty = "easy" | "normal" | "hard";
 type Phase = "choosing" | "chant" | "reveal" | "gameover";
-type Player = { userId: string; username: string; side: Side };
+type Player = { userId: string; username: string; side: Side; isBot?: boolean; difficulty?: BotDifficulty };
 type LastResult = { leftChoice: Choice; rightChoice: Choice; winnerSide: Side | null };
 type Row = {
   room_code: string;
@@ -120,6 +121,12 @@ function parseResult(raw: unknown): LastResult | null {
 function randomChoice(): Choice {
   return (["rock", "paper", "scissors"] as Choice[])[Math.floor(Math.random() * 3)];
 }
+function counterChoice(choice: Choice): Choice { return choice === "rock" ? "paper" : choice === "paper" ? "scissors" : "rock"; }
+function botChoiceAgainst(choice: Choice, difficulty: BotDifficulty): Choice {
+  const chance = difficulty === "easy" ? 0.18 : difficulty === "hard" ? 0.68 : 0.4;
+  return Math.random() < chance ? counterChoice(choice) : randomChoice();
+}
+
 function roundWinner(left: Choice, right: Choice): Side | null {
   if (left === right) return null;
   if (
@@ -247,7 +254,16 @@ async function recordChoice(code: string, userId: string, choice: Choice) {
 
     // JSONB concatène la nouvelle clé sans relire/réécrire les choix de l'autre joueur.
     // Avec le verrou de ligne, deux clics simultanés ne peuvent plus s'écraser.
-    const updated = await client.query<Row>(
+    const bot = players.find((player) => player.isBot);
+    const botChoice = bot ? botChoiceAgainst(choice, bot.difficulty ?? "normal") : null;
+    const updated = bot && botChoice ? await client.query<Row>(
+      `update retro_rps_games
+       set choices=coalesce(choices,'{}'::jsonb) || jsonb_build_object($2::text,$3::text) || jsonb_build_object($4::text,$5::text),updated_at=now()
+       where room_code=$1
+       returning room_code,status,players,rounds_total,round_index,left_score,right_score,choices,phase,
+                 phase_started_at::text,phase_ends_at::text,last_result,winner_side`,
+      [code, userId, choice, bot.userId, botChoice]
+    ) : await client.query<Row>(
       `update retro_rps_games
        set choices=coalesce(choices,'{}'::jsonb) || jsonb_build_object($2::text,$3::text),updated_at=now()
        where room_code=$1
@@ -318,11 +334,23 @@ export async function POST(req: NextRequest) {
          where m.room_code=$1 and m.last_seen>now()-interval '15 seconds' order by m.joined_at`,
         [code]
       );
-      if (members.rows.length !== 2) throw new Error("Pierre-Feuille-Ciseaux se joue avec exactement 2 joueurs connectés.");
-      const players: Player[] = [
-        { userId: members.rows[0].id, username: members.rows[0].username, side: "left" },
-        { userId: members.rows[1].id, username: members.rows[1].username, side: "right" },
-      ];
+      const requestedBot = String(data.botDifficulty ?? "");
+      const botDifficulty: BotDifficulty | null = requestedBot === "easy" || requestedBot === "normal" || requestedBot === "hard" ? requestedBot : null;
+      let players: Player[];
+      if (botDifficulty) {
+        const human = members.rows.find((member) => member.id === user.id) ?? members.rows[0];
+        if (!human) throw new Error("Tu dois être dans la room pour jouer contre le bot.");
+        players = [
+          { userId: human.id, username: human.username, side: "left" },
+          { userId: "bot:rps", username: "BOT", side: "right", isBot: true, difficulty: botDifficulty },
+        ];
+      } else {
+        if (members.rows.length !== 2) throw new Error("Pierre-Feuille-Ciseaux se joue avec exactement 2 joueurs connectés.");
+        players = [
+          { userId: members.rows[0].id, username: members.rows[0].username, side: "left" },
+          { userId: members.rows[1].id, username: members.rows[1].username, side: "right" },
+        ];
+      }
       await db().query(
         `update retro_rps_games set status='playing',players=$1::jsonb,round_index=0,left_score=0,right_score=0,
          choices='{}'::jsonb,phase='choosing',phase_started_at=now(),phase_ends_at=now()+($2 * interval '1 millisecond'),last_result=null,winner_side=null,updated_at=now()

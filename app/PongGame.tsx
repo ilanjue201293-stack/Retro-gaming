@@ -6,7 +6,8 @@ type User = { id: string; username: string };
 type RoomMember = { id: string; username: string; online: boolean; joined_at: string };
 type Room = { code: string; hostId: string; members: RoomMember[] };
 type Side = "left" | "right";
-type Player = { userId: string; username: string; side: Side };
+type BotDifficulty = "easy" | "normal" | "hard";
+type Player = { userId: string; username: string; side: Side; isBot?: boolean; difficulty?: BotDifficulty };
 type Paddle = { y: number; vy: number };
 type Ball = { x: number; y: number; vx: number; vy: number };
 type Frame = {
@@ -233,11 +234,28 @@ function predictBall(ball: Ball, ageSeconds: number) {
   return { ...ball, x, y, vy };
 }
 
+function updatePongBot(simulation: Simulation, game: Game, now: number) {
+  const bot = game.players.find((player) => player.isBot);
+  if (!bot) return;
+  const paddle = simulation.frame.paddles[bot.userId] ?? { y: 0.5, vy: 0 };
+  const difficulty = bot.difficulty ?? "normal";
+  const speed = difficulty === "easy" ? 0.48 : difficulty === "hard" ? 1.04 : 0.72;
+  const error = difficulty === "easy" ? 0.105 : difficulty === "hard" ? 0.025 : 0.055;
+  const ball = simulation.frame.ball;
+  const movingTowardBot = bot.side === "right" ? ball.vx > 0 : ball.vx < 0;
+  const wobble = Math.sin(now / 360 + simulation.frame.leftScore * 1.4) * error;
+  const desired = movingTowardBot ? clampPaddleY(ball.y + wobble) : 0.5;
+  const dt = clamp((now - simulation.lastTs) / 1000, 0.008, 0.032);
+  const delta = clamp(desired - paddle.y, -speed * dt, speed * dt);
+  simulation.targets[bot.userId] = clampPaddleY(paddle.y + delta);
+}
+
 export default function PongGame({ room, user }: { room: Room; user: User }) {
   const [game, setGame] = useState<Game | null>(null);
   const [frame, setFrame] = useState<Frame | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [botDifficulty, setBotDifficulty] = useState<BotDifficulty>("normal");
   const [clock, setClock] = useState(Date.now());
 
   const gameRef = useRef<Game | null>(null);
@@ -484,7 +502,7 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
         signalCursorRef.current = Number(data.cursor ?? signalCursorRef.current);
         for (const signal of (data.signals ?? []) as Signal[]) await handleSignal(signal);
       } catch {}
-      const peer = peersRef.current.get(isHost ? (gameRef.current?.players.find((p) => p.userId !== user.id)?.userId ?? "") : room.hostId);
+      const peer = peersRef.current.get(isHost ? (gameRef.current?.players.find((p) => p.userId !== user.id && !p.isBot)?.userId ?? "") : room.hostId);
       timer = window.setTimeout(() => void signalPoll(), peer?.dc?.readyState === "open" ? 700 : 90);
     };
     void signalPoll();
@@ -494,7 +512,7 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
   useEffect(() => {
     if (!game || game.status !== "playing" || !isHost) return;
     const ensure = () => {
-      const other = gameRef.current?.players.find((player) => player.userId !== user.id);
+      const other = gameRef.current?.players.find((player) => player.userId !== user.id && !player.isBot);
       if (other) void startHostPeer(other.userId);
     };
     ensure();
@@ -516,6 +534,7 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
 
       const own = current.players.find((player) => player.userId === user.id);
       if (own) simulation.targets[user.id] = localYRef.current;
+      updatePongBot(simulation, current, now);
 
       let suddenDeath = false;
       if (!simulation.frame.winnerSide && current.endsAt && Date.now() >= current.endsAt) {
@@ -546,7 +565,7 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
         simulation.lastBroadcast = now;
         const message = JSON.stringify({ type: "state", state: simulation.frame });
         for (const player of current.players) {
-          if (player.userId === user.id) continue;
+          if (player.userId === user.id || player.isBot) continue;
           const channel = peersRef.current.get(player.userId)?.dc;
           if (channel?.readyState === "open") { try { channel.send(message); } catch {} }
         }
@@ -554,7 +573,7 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
       if (now - simulation.lastFallbackBroadcast >= 170) {
         simulation.lastFallbackBroadcast = now;
         for (const player of current.players) {
-          if (player.userId === user.id) continue;
+          if (player.userId === user.id || player.isBot) continue;
           if (peersRef.current.get(player.userId)?.dc?.readyState !== "open") void sendSignal(player.userId, "state", simulation.frame).catch(() => undefined);
         }
       }
@@ -673,10 +692,10 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
     finally { setBusy(false); }
   };
 
-  const start = async () => {
+  const start = async (withBot = false) => {
     try {
       setBusy(true); setError(""); closeAllPeers(); signalCursorRef.current = 0;
-      const data = await post({ action: "start", code: room.code });
+      const data = await post({ action: "start", code: room.code, botDifficulty: withBot ? botDifficulty : null });
       gameRef.current = data.game as Game;
       setGame(data.game as Game);
       setClock(Date.now());
@@ -699,8 +718,9 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
       </div>
       <div className="pongReady">
         <span>{online}/2 joueurs connectés</span>
-        {isHost ? <button className="primaryButton" disabled={busy || online !== 2} onClick={() => void start()}>{busy ? "Lancement…" : "Lancer Pong"}</button> : <small>En attente de l'hôte…</small>}
+        {isHost ? <button className="primaryButton" disabled={busy || online !== 2} onClick={() => void start(false)}>{busy ? "Lancement…" : "Lancer Pong"}</button> : <small>En attente de l'hôte…</small>}
       </div>
+      {isHost && online === 1 && <div className="botPlayPanel"><div><strong>🤖 Jouer contre un bot</strong><small>Pas besoin d'attendre un ami.</small></div><select value={botDifficulty} onChange={(event) => setBotDifficulty(event.target.value as BotDifficulty)}><option value="easy">Facile</option><option value="normal">Normal</option><option value="hard">Difficile</option></select><button disabled={busy} onClick={() => void start(true)}>Lancer vs BOT</button></div>}
       {error && <div className="errorBox">{error}</div>}
     </section>;
   }
@@ -722,7 +742,7 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
       <div className="pongPaddle pongPaddleLeft" style={{ top: `${leftPaddle.y * 100}%` }}/>
       <div className="pongPaddle pongPaddleRight" style={{ top: `${rightPaddle.y * 100}%` }}/>
       <div className="pongBall" style={{ left: `${shown.ball.x * 100}%`, top: `${shown.ball.y * 100}%` }}/>
-      {shown.winnerSide && <div className="pongWinner"><strong>{winner || "Joueur"} gagne</strong><span>{shown.leftScore} — {shown.rightScore}</span>{isHost && <button onClick={() => void start()}>Rejouer</button>}</div>}
+      {shown.winnerSide && <div className="pongWinner"><strong>{winner || "Joueur"} gagne</strong><span>{shown.leftScore} — {shown.rightScore}</span>{isHost && <button onClick={() => void start(Boolean(game.players.some((player) => player.isBot)))}>Rejouer</button>}</div>}
     </div>
     <div className="pongControlsHint">Glisse verticalement · clavier : ↑ ↓ ou W S</div>
     {error && <div className="errorBox">{error}</div>}

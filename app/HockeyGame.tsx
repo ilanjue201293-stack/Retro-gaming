@@ -6,8 +6,9 @@ type User = { id: string; username: string; avatarData?: string | null };
 type RoomMember = { id: string; username: string; online: boolean; joined_at: string };
 type Room = { code: string; hostId: string; members: RoomMember[] };
 type Mode = "1v1" | "2v2";
+type BotDifficulty = "easy" | "normal" | "hard";
 type Side = "left" | "right";
-type Player = { userId: string; username: string; avatarData?: string | null; side: Side; slot: number };
+type Player = { userId: string; username: string; avatarData?: string | null; side: Side; slot: number; isBot?: boolean; difficulty?: BotDifficulty };
 type Paddle = { x: number; y: number; vx: number; vy: number };
 type Puck = { x: number; y: number; vx: number; vy: number };
 type Frame = { puck: Puck; paddles: Record<string, Paddle>; leftScore: number; rightScore: number; winnerSide: Side | null; pauseUntil: number };
@@ -247,10 +248,33 @@ function predictPuck(puck: Puck, ageSeconds: number) {
   return { x: clamp(x, -0.04, 1.04), y: clamp(y, TOP_BOARD, BOTTOM_BOARD), vx, vy };
 }
 
+function updateHockeyBot(simulation: Simulation, game: Game, now: number) {
+  const bot = game.players.find((player) => player.isBot);
+  if (!bot) return;
+  const paddle = simulation.frame.paddles[bot.userId] ?? initialPaddle(bot, game.mode);
+  if (Date.now() < simulation.frame.pauseUntil) { simulation.targets[bot.userId] = { ...paddle, vx: 0, vy: 0 }; return; }
+  const difficulty = bot.difficulty ?? "normal";
+  const speed = difficulty === "easy" ? 0.58 : difficulty === "hard" ? 1.18 : 0.86;
+  const accuracy = difficulty === "easy" ? 0.075 : difficulty === "hard" ? 0.018 : 0.042;
+  const puck = simulation.frame.puck;
+  const attack = bot.side === "right" ? puck.x > 0.48 : puck.x < 0.52;
+  const guardX = bot.side === "right" ? 0.82 : 0.18;
+  const desiredX = attack ? clamp(puck.x + (bot.side === "right" ? 0.055 : -0.055), bot.side === "right" ? 0.56 : 0.10, bot.side === "right" ? 0.90 : 0.44) : guardX;
+  const wobble = Math.sin(now / 420 + game.leftScore * 1.7 + game.rightScore) * accuracy;
+  const desiredY = clamp(puck.y + wobble, 0.11, 0.89);
+  const dt = clamp((now - simulation.lastTs) / 1000, 0.008, 0.032);
+  const dx = desiredX - paddle.x, dy = desiredY - paddle.y, distance = Math.hypot(dx, dy);
+  const maxMove = speed * dt;
+  const factor = distance > maxMove && distance > 0.0001 ? maxMove / distance : 1;
+  const point = clampPaddle(bot.side, paddle.x + dx * factor, paddle.y + dy * factor);
+  simulation.targets[bot.userId] = { x: point.x, y: point.y, vx: (point.x - paddle.x) / dt, vy: (point.y - paddle.y) / dt };
+}
+
 export default function HockeyGame({ room, user }: { room: Room; user: User; onActiveChange?: (active: boolean) => void }) {
   const [game, setGame] = useState<Game | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [botDifficulty, setBotDifficulty] = useState<BotDifficulty>("normal");
   const [frame, setFrame] = useState<Frame | null>(null);
   const [avatarData, setAvatarData] = useState<string | null>(user.avatarData ?? null);
   const [avatarBusy, setAvatarBusy] = useState(false);
@@ -374,7 +398,14 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
     const poll = async () => {
       if (!alive) return;
       try { const current = gameRef.current; const data = await post({ action: "hockeyState", code: room.code }); if (alive) { const next = data.game as Game; gameRef.current = next; setGame(next); setError(""); } const delay = current?.status === "playing" ? 1200 : 320; if (alive) timer = window.setTimeout(() => void poll(), delay); }
-      catch (pollError) { if (alive) { setError(pollError instanceof Error ? pollError.message : "Hockey indisponible."); timer = window.setTimeout(() => void poll(), 900); } }
+      catch (pollError) {
+        if (alive) {
+          const current = gameRef.current;
+          const message = pollError instanceof Error ? pollError.message : "Hockey indisponible.";
+          if (!current || current.status === "lobby") setError(message);
+          timer = window.setTimeout(() => void poll(), current?.status === "playing" ? 2200 : 900);
+        }
+      }
     };
     void poll(); return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };
   }, [room.code]);
@@ -402,15 +433,15 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
       if (!alive) return;
       try { const data = await post({ action: "hockeySignalPoll", code: room.code, after: signalCursorRef.current }); if (!alive) return; signalCursorRef.current = Number(data.cursor ?? signalCursorRef.current); for (const signal of (data.signals ?? []) as Signal[]) await handleSignal(signal); } catch {}
       const current = gameRef.current; let directReady = false;
-      if (current && current.status !== "lobby") { if (room.hostId === user.id) { const remotes = current.players.filter((player) => player.userId !== user.id); directReady = remotes.length > 0 && remotes.every((player) => peersRef.current.get(player.userId)?.dc?.readyState === "open"); } else directReady = peersRef.current.get(room.hostId)?.dc?.readyState === "open"; }
-      timer = window.setTimeout(() => void signalPoll(), directReady ? 700 : 90);
+      if (current && current.status !== "lobby") { if (room.hostId === user.id) { const remotes = current.players.filter((player) => player.userId !== user.id && !player.isBot); directReady = remotes.length > 0 && remotes.every((player) => peersRef.current.get(player.userId)?.dc?.readyState === "open"); } else directReady = peersRef.current.get(room.hostId)?.dc?.readyState === "open"; }
+      timer = window.setTimeout(() => void signalPoll(), directReady ? 1000 : 180);
     };
     void signalPoll(); return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };
   }, [game?.status, handleSignal, room.code, room.hostId, user.id]);
 
   useEffect(() => {
     if (!game || game.status !== "playing" || room.hostId !== user.id) return;
-    const ensure = () => { const current = gameRef.current; if (!current || current.status === "lobby") return; for (const player of current.players) if (player.userId !== user.id) void startHostPeer(player.userId); };
+    const ensure = () => { const current = gameRef.current; if (!current || current.status === "lobby") return; for (const player of current.players) if (player.userId !== user.id && !player.isBot) void startHostPeer(player.userId); };
     ensure(); const id = window.setInterval(ensure, 900); return () => window.clearInterval(id);
   }, [game?.status, room.hostId, startHostPeer, user.id]);
 
@@ -422,6 +453,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
       const current = gameRef.current, simulation = simulationRef.current;
       if (!current || !simulation || current.status === "lobby" || room.hostId !== user.id) return;
       if (Date.now() >= simulation.frame.pauseUntil) { const local = localInputRef.current; if (local) { const own = current.players.find((player) => player.userId === user.id); if (own) simulation.targets[user.id] = { ...local }; } }
+      updateHockeyBot(simulation, current, now);
 
       let suddenDeath = false;
       if (!simulation.frame.winnerSide && current.endsAt && Date.now() >= current.endsAt) {
@@ -447,8 +479,8 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
       if (simulation.frame.leftScore !== simulation.lastCheckpointLeft || simulation.frame.rightScore !== simulation.lastCheckpointRight) {
         simulation.lastCheckpointLeft = simulation.frame.leftScore; simulation.lastCheckpointRight = simulation.frame.rightScore; resetLocalToStart(current); checkpoint(simulation.frame.leftScore, simulation.frame.rightScore, simulation.frame.winnerSide);
       }
-      if (now - simulation.lastBroadcast >= 33) { simulation.lastBroadcast = now; const message = JSON.stringify({ type: "state", state: simulation.frame }); for (const player of current.players) { if (player.userId === user.id) continue; const channel = peersRef.current.get(player.userId)?.dc; if (channel?.readyState === "open") { try { channel.send(message); } catch {} } } }
-      if (now - simulation.lastFallbackBroadcast >= 170) { simulation.lastFallbackBroadcast = now; for (const player of current.players) { if (player.userId === user.id) continue; const channel = peersRef.current.get(player.userId)?.dc; if (channel?.readyState !== "open") void sendSignal(player.userId, "state", simulation.frame).catch(() => undefined); } }
+      if (now - simulation.lastBroadcast >= 33) { simulation.lastBroadcast = now; const message = JSON.stringify({ type: "state", state: simulation.frame }); for (const player of current.players) { if (player.userId === user.id || player.isBot) continue; const channel = peersRef.current.get(player.userId)?.dc; if (channel?.readyState === "open") { try { channel.send(message); } catch {} } } }
+      if (now - simulation.lastFallbackBroadcast >= 280) { simulation.lastFallbackBroadcast = now; for (const player of current.players) { if (player.userId === user.id || player.isBot) continue; const channel = peersRef.current.get(player.userId)?.dc; if (channel?.readyState !== "open") void sendSignal(player.userId, "state", simulation.frame).catch(() => undefined); } }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick); return () => cancelAnimationFrame(raf);
@@ -463,7 +495,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
   const sendRemoteInput = useCallback((packet: InputPacket, force = false) => {
     if (room.hostId === user.id) return; const now = performance.now(), channel = peersRef.current.get(room.hostId)?.dc;
     if (channel?.readyState === "open") { if (force || now - lastDirectInputSendRef.current >= 12) { lastDirectInputSendRef.current = now; try { channel.send(JSON.stringify({ type: "input", input: packet })); } catch {} } return; }
-    if (force || now - lastFallbackInputSendRef.current >= 85) { lastFallbackInputSendRef.current = now; void sendSignal(room.hostId, "input", packet).catch(() => undefined); }
+    if (force || now - lastFallbackInputSendRef.current >= 130) { lastFallbackInputSendRef.current = now; void sendSignal(room.hostId, "input", packet).catch(() => undefined); }
   }, [room.hostId, sendSignal, user.id]);
 
   useEffect(() => { if (!game || game.status !== "playing" || room.hostId === user.id) return; const id = window.setInterval(() => { if (!draggingRef.current || !localInputRef.current) return; const snapshot = remoteSnapshotRef.current?.frame; if (snapshot && Date.now() < snapshot.pauseUntil) return; sendRemoteInput(localInputRef.current, true); }, 28); return () => window.clearInterval(id); }, [game?.status, room.hostId, sendRemoteInput, user.id]);
@@ -495,7 +527,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
     catch (actionError) { setError(actionError instanceof Error ? actionError.message : "Erreur."); }
     finally { setBusy(false); }
   };
-  const start = async () => { try { setBusy(true); signalCursorRef.current = 0; closeAllPeers(); applyGame((await post({ action: "hockeyStart", code: room.code })).game as Game); setClock(Date.now()); } catch (actionError) { setError(actionError instanceof Error ? actionError.message : "Erreur."); } finally { setBusy(false); } };
+  const start = async (withBot = false) => { try { setBusy(true); signalCursorRef.current = 0; closeAllPeers(); applyGame((await post({ action: "hockeyStart", code: room.code, botDifficulty: withBot ? botDifficulty : null })).game as Game); setClock(Date.now()); } catch (actionError) { setError(actionError instanceof Error ? actionError.message : "Erreur."); } finally { setBusy(false); } };
 
   if (!game) return <section className="hockeyLobby"><div className="spinner"/><p>Chargement du hockey…</p>{error && <div className="errorBox">{error}</div>}</section>;
 
@@ -516,7 +548,8 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
         <label className={`hockeyAvatarButton ${avatarBusy ? "disabled" : ""}`}>{avatarBusy ? "Préparation…" : avatarData ? "Changer" : "Choisir une photo"}<input type="file" accept="image/*" disabled={avatarBusy} onChange={(event) => void uploadAvatar(event)}/></label>
         {avatarData && <button className="hockeyAvatarRemove" disabled={avatarBusy} onClick={() => void removeAvatar()}>Retirer</button>}
       </div>
-      <div className="hockeyReadyBar"><span>{online}/{needed} joueurs connectés</span>{isHost ? <button className="primaryButton" disabled={busy || online < needed} onClick={() => void start()}>{busy ? "Lancement…" : `Lancer le ${game.mode}`}</button> : <small>En attente de l'hôte…</small>}</div>
+      <div className="hockeyReadyBar"><span>{online}/{needed} joueurs connectés</span>{isHost ? <button className="primaryButton" disabled={busy || online < needed} onClick={() => void start(false)}>{busy ? "Lancement…" : `Lancer le ${game.mode}`}</button> : <small>En attente de l'hôte…</small>}</div>
+      {isHost && game.mode === "1v1" && online === 1 && <div className="botPlayPanel"><div><strong>🤖 Personne avec qui jouer ?</strong><small>Lance un 1v1 contre un bot.</small></div><select value={botDifficulty} onChange={(event) => setBotDifficulty(event.target.value as BotDifficulty)}><option value="easy">Facile</option><option value="normal">Normal</option><option value="hard">Difficile</option></select><button disabled={busy} onClick={() => void start(true)}>Jouer contre le bot</button></div>}
       {error && <div className="errorBox">{error}</div>}
     </section>;
   }

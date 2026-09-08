@@ -3,7 +3,7 @@ import { requireUser, SESSION_COOKIE, type AuthUser } from "@/lib/auth";
 import { cleanup, db, ensureSchema } from "@/lib/db";
 import { cleanRoomCode, makeId, makeRoomCode, sha256 } from "@/lib/utils";
 import { requireRoomMember } from "@/lib/room";
-import { hockeyConfigure, hockeyStart, hockeyState, hockeyStop, type HockeyMode } from "@/lib/hockey-room";
+import { hockeyConfigure, hockeyStart, hockeyState, hockeyStop, type BotDifficulty, type HockeyMode } from "@/lib/hockey-room";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -116,7 +116,9 @@ export async function POST(req: NextRequest) {
         await db().query(`delete from retro_hockey_signals where room_code=$1`, [code]);
         await db().query(`update retro_pong_games set status='lobby',players='[]'::jsonb,left_score=0,right_score=0,winner_side=null,started_at=null,updated_at=now() where room_code=$1`, [code]).catch(() => undefined);
         await db().query(`update retro_rps_games set status='lobby',players='[]'::jsonb,round_index=0,left_score=0,right_score=0,choices='{}'::jsonb,phase='choosing',phase_started_at=null,phase_ends_at=null,last_result=null,winner_side=null,updated_at=now() where room_code=$1`, [code]).catch(() => undefined);
-        return NextResponse.json({ ok: true, game: await hockeyStart(code, user.id) });
+        const requestedBot = String(data.botDifficulty ?? "");
+        const botDifficulty: BotDifficulty | null = requestedBot === "easy" || requestedBot === "normal" || requestedBot === "hard" ? requestedBot : null;
+        return NextResponse.json({ ok: true, game: await hockeyStart(code, user.id, botDifficulty) });
       }
 
       if (action === "hockeyStop") {

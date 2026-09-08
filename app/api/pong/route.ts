@@ -7,7 +7,8 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type Side = "left" | "right";
-type Player = { userId: string; username: string; side: Side };
+type BotDifficulty = "easy" | "normal" | "hard";
+type Player = { userId: string; username: string; side: Side; isBot?: boolean; difficulty?: BotDifficulty };
 type PongRow = {
   room_code: string;
   status: "lobby" | "playing" | "gameover";
@@ -165,11 +166,23 @@ export async function POST(req: NextRequest) {
          order by m.joined_at`,
         [code]
       );
-      if (members.rows.length !== 2) throw new Error("Pong se joue avec exactement 2 joueurs connectés.");
-      const players: Player[] = [
-        { userId: members.rows[0].id, username: members.rows[0].username, side: "left" },
-        { userId: members.rows[1].id, username: members.rows[1].username, side: "right" },
-      ];
+      const requestedBot = String(data.botDifficulty ?? "");
+      const botDifficulty: BotDifficulty | null = requestedBot === "easy" || requestedBot === "normal" || requestedBot === "hard" ? requestedBot : null;
+      let players: Player[];
+      if (botDifficulty) {
+        const human = members.rows.find((member) => member.id === user.id) ?? members.rows[0];
+        if (!human) throw new Error("Tu dois être dans la room pour jouer contre le bot.");
+        players = [
+          { userId: human.id, username: human.username, side: "left" },
+          { userId: "bot:pong", username: "BOT", side: "right", isBot: true, difficulty: botDifficulty },
+        ];
+      } else {
+        if (members.rows.length !== 2) throw new Error("Pong se joue avec exactement 2 joueurs connectés.");
+        players = [
+          { userId: members.rows[0].id, username: members.rows[0].username, side: "left" },
+          { userId: members.rows[1].id, username: members.rows[1].username, side: "right" },
+        ];
+      }
       await db().query(`update retro_hockey_games set status='lobby',players='[]'::jsonb,left_score=0,right_score=0,winner_side=null,updated_at=now() where room_code=$1`, [code]);
       await db().query(`update retro_rps_games set status='lobby',players='[]'::jsonb,round_index=0,left_score=0,right_score=0,choices='{}'::jsonb,phase='choosing',phase_started_at=null,phase_ends_at=null,last_result=null,winner_side=null,updated_at=now() where room_code=$1`, [code]).catch(() => undefined);
       await db().query(

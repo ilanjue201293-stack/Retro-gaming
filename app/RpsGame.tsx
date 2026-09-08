@@ -7,7 +7,8 @@ type RoomMember = { id: string; username: string; online: boolean; joined_at: st
 type Room = { code: string; hostId: string; members: RoomMember[] };
 type Side = "left" | "right";
 type Choice = "rock" | "paper" | "scissors";
-type Player = { userId: string; username: string; side: Side };
+type BotDifficulty = "easy" | "normal" | "hard";
+type Player = { userId: string; username: string; side: Side; isBot?: boolean; difficulty?: BotDifficulty };
 type Result = { leftChoice: Choice; rightChoice: Choice; winnerSide: Side | null };
 type Game = {
   status: "lobby" | "playing" | "gameover";
@@ -53,6 +54,7 @@ async function post(payload: Record<string, unknown>) {
 export default function RpsGame({ room, user }: { room: Room; user: User }) {
   const [game, setGame] = useState<Game | null>(null);
   const [busy, setBusy] = useState(false);
+  const [botDifficulty, setBotDifficulty] = useState<BotDifficulty>("normal");
   const [error, setError] = useState("");
   const [clock, setClock] = useState(Date.now());
   const gameRef = useRef<Game | null>(null);
@@ -118,10 +120,10 @@ export default function RpsGame({ room, user }: { room: Room; user: User }) {
     } finally { setBusy(false); }
   };
 
-  const start = async () => {
+  const start = async (withBot = false) => {
     try {
       setBusy(true); setError("");
-      const data = await post({ action: "start", code: room.code });
+      const data = await post({ action: "start", code: room.code, botDifficulty: withBot ? botDifficulty : null });
       setGame(data.game as Game);
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : "Erreur.");
@@ -168,8 +170,9 @@ export default function RpsGame({ room, user }: { room: Room; user: User }) {
       </div>
       <div className="rpsReady">
         <div className="rpsOnline"><i className={online === 2 ? "ready" : ""}/><span>{online}/2 connectés</span></div>
-        {isHost ? <button className="primaryButton" disabled={busy || online !== 2} onClick={() => void start()}>{busy ? "Lancement…" : "Lancer le duel"}</button> : <small>En attente de l'hôte…</small>}
+        {isHost ? <button className="primaryButton" disabled={busy || online !== 2} onClick={() => void start(false)}>{busy ? "Lancement…" : "Lancer le duel"}</button> : <small>En attente de l'hôte…</small>}
       </div>
+      {isHost && online === 1 && <div className="botPlayPanel rpsBotPanel"><div><strong>🤖 Affronter un bot</strong><small>Le bot choisit aussi pendant les 3 secondes.</small></div><select value={botDifficulty} onChange={(event) => setBotDifficulty(event.target.value as BotDifficulty)}><option value="easy">Facile</option><option value="normal">Normal</option><option value="hard">Difficile</option></select><button disabled={busy} onClick={() => void start(true)}>Jouer vs BOT</button></div>}
       {error && <div className="errorBox rpsLobbyError">{error}</div>}
     </section>;
   }

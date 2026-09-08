@@ -6,6 +6,7 @@ import "./hockey-v5.css";
 import "./hockey-v6.css";
 import "./pong.css";
 import "./rps.css";
+import "./bots.css";
 
 export const metadata: Metadata = {
   title: "Retro Gaming",

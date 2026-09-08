@@ -1,8 +1,9 @@
 import { db } from "./db";
 
 export type HockeyMode = "1v1" | "2v2";
+export type BotDifficulty = "easy" | "normal" | "hard";
 type Side = "left" | "right";
-type Player = { userId:string; username:string; avatarData?:string|null; side:Side; slot:number };
+type Player = { userId:string; username:string; avatarData?:string|null; side:Side; slot:number; isBot?:boolean; difficulty?:BotDifficulty };
 type Paddle = { x:number; y:number; vx:number; vy:number };
 type Frame = { puck:{x:number;y:number;vx:number;vy:number}; paddles:Record<string,Paddle>; leftScore:number; rightScore:number; winnerSide:Side|null; pauseUntil:number };
 type Input = Paddle & { at:number };
@@ -78,12 +79,25 @@ export async function hockeyConfigure(code:string,userId:string,mode:HockeyMode,
   await db().query(`update retro_hockey_games set mode=$1,status='lobby',players=$2::jsonb,left_score=0,right_score=0,winner_side=null,updated_at=now() where room_code=$3`,[mode,JSON.stringify(s),code]);
   return hockeyState(code);
 }
-export async function hockeyStart(code:string,userId:string){
-  if(await host(code)!==userId)throw new Error("Seul l'hôte peut lancer le match.");const r=await row(code),need=r.mode==="2v2"?4:2,current=decode(r.players,r);
+export async function hockeyStart(code:string,userId:string,botDifficulty:BotDifficulty|null=null){
+  if(await host(code)!==userId)throw new Error("Seul l'hôte peut lancer le match.");
+  const r=await row(code),need=r.mode==="2v2"?4:2,current=decode(r.players,r);
   const members=await db().query<{id:string;username:string;avatar_data:string|null}>(`select u.id,u.username,u.avatar_data from retro_room_members m join retro_users u on u.id=m.user_id where m.room_code=$1 and m.last_seen>now()-interval '15 seconds' order by m.joined_at`,[code]);
-  if(members.rows.length<need)throw new Error(r.mode==="2v2"?"Il faut 4 joueurs connectés pour le 2v2.":"Il faut 2 joueurs connectés pour le 1v1.");
-  const roster:Player[]=members.rows.slice(0,need).map((m,i)=>({userId:m.id,username:m.username,avatarData:m.avatar_data,side:i%2===0?"left":"right",slot:r.mode==="2v2"?Math.floor(i/2):0})),now=Date.now(),frame=fresh(roster,r.mode,now),inputs=Object.fromEntries(roster.map(p=>[p.userId,{...initial(p,r.mode),at:now}])),s:Stored={roster,frame,inputs,lastTick:now,targetScore:current.targetScore,timeLimitSec:current.timeLimitSec,startedAt:now};
-  await db().query(`update retro_hockey_games set status='playing',players=$1::jsonb,left_score=0,right_score=0,winner_side=null,updated_at=now() where room_code=$2`,[JSON.stringify(s),code]);return output({...r,status:"playing",players:s,left_score:0,right_score:0,winner_side:null},s);
+  let roster:Player[];
+  if(botDifficulty&&r.mode==="1v1"){
+    const human=members.rows.find((member)=>member.id===userId)??members.rows[0];
+    if(!human)throw new Error("Tu dois être dans la room pour jouer contre un bot.");
+    roster=[
+      {userId:human.id,username:human.username,avatarData:human.avatar_data,side:"left",slot:0},
+      {userId:"bot:hockey",username:"BOT",avatarData:null,side:"right",slot:0,isBot:true,difficulty:botDifficulty},
+    ];
+  }else{
+    if(members.rows.length<need)throw new Error(r.mode==="2v2"?"Il faut 4 joueurs connectés pour le 2v2.":"Il faut 2 joueurs connectés pour le 1v1.");
+    roster=members.rows.slice(0,need).map((m,i)=>({userId:m.id,username:m.username,avatarData:m.avatar_data,side:i%2===0?"left":"right",slot:r.mode==="2v2"?Math.floor(i/2):0}));
+  }
+  const now=Date.now(),frame=fresh(roster,r.mode,now),inputs=Object.fromEntries(roster.map(p=>[p.userId,{...initial(p,r.mode),at:now}])),s:Stored={roster,frame,inputs,lastTick:now,targetScore:current.targetScore,timeLimitSec:current.timeLimitSec,startedAt:now};
+  await db().query(`update retro_hockey_games set status='playing',players=$1::jsonb,left_score=0,right_score=0,winner_side=null,updated_at=now() where room_code=$2`,[JSON.stringify(s),code]);
+  return output({...r,status:"playing",players:s,left_score:0,right_score:0,winner_side:null},s);
 }
 export async function hockeyStop(code:string,userId:string){if(await host(code)!==userId)throw new Error("Seul l'hôte peut arrêter le match.");const r=await row(code),current=decode(r.players,r),s=emptyStored(current.targetScore,current.timeLimitSec);await db().query(`update retro_hockey_games set status='lobby',players=$1::jsonb,left_score=0,right_score=0,winner_side=null,updated_at=now() where room_code=$2`,[JSON.stringify(s),code]);return hockeyState(code)}
 export async function hockeySync(code:string,userId:string,input?:Partial<Paddle>){
