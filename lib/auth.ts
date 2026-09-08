@@ -7,7 +7,7 @@ import { makeId, makeToken, sha256 } from "./utils";
 const scrypt = promisify(scryptCb);
 export const SESSION_COOKIE = "retro_session";
 const SESSION_DAYS = 30;
-export type AuthUser = { id: string; username: string; avatarData: string | null };
+export type AuthUser = { id: string; username: string; avatarData?: string | null };
 
 export async function hashPassword(password: string) {
   const salt = randomBytes(16).toString("hex");
