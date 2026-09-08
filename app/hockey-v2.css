@@ -1,0 +1,97 @@
+/* Hockey V2: patinoire plus grande et mouvements visuellement plus fluides. */
+
+.appShell:has(.hockeyLobby),
+.appShell:has(.hockeyGameWrap){
+  max-width:1540px;
+}
+
+.roomLayout:has(.hockeyLobby),
+.roomLayout:has(.hockeyGameWrap){
+  grid-template-columns:minmax(0,1fr) 260px;
+  gap:16px;
+}
+
+.hockeyGameWrap{
+  padding:14px;
+}
+
+.rinkFrame{
+  padding:11px;
+}
+
+.hockeyRink{
+  aspect-ratio:16/9.5;
+  min-height:520px;
+}
+
+.hockeyPuck{
+  width:4.8%;
+  transition:left 28ms linear,top 28ms linear;
+}
+
+.hockeyMallet{
+  width:10.4%;
+  transition:left 26ms linear,top 26ms linear;
+}
+
+.hockeyMallet.mine{
+  transition:none;
+}
+
+.hockeyGameTop{
+  margin-bottom:10px;
+}
+
+@media(max-width:1100px){
+  .roomLayout:has(.hockeyLobby),
+  .roomLayout:has(.hockeyGameWrap){
+    grid-template-columns:1fr;
+  }
+
+  .roomSide{
+    grid-row:auto;
+  }
+
+  .hockeyRink{
+    min-height:0;
+    aspect-ratio:16/10;
+  }
+}
+
+@media(max-width:700px){
+  .hockeyGameWrap{
+    padding:8px;
+  }
+
+  .rinkFrame{
+    padding:5px;
+  }
+
+  .hockeyRink{
+    min-height:0;
+    aspect-ratio:4/3;
+  }
+
+  .hockeyMallet{
+    width:13%;
+  }
+
+  .hockeyPuck{
+    width:5.8%;
+    transition:left 30ms linear,top 30ms linear;
+  }
+}
+
+@media(max-width:480px){
+  .hockeyRink{
+    aspect-ratio:10/9;
+  }
+
+  .hockeyMallet{
+    width:14.5%;
+  }
+
+  .hockeyPuck{
+    width:6.6%;
+  }
+}
