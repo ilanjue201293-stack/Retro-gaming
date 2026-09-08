@@ -43,9 +43,11 @@ export async function ensureSchema() {
           username text not null,
           username_key text not null unique,
           password_hash text not null,
+          avatar_data text,
           created_at timestamptz not null default now(),
           last_seen timestamptz not null default now()
         );
+        alter table retro_users add column if not exists avatar_data text;
         create table if not exists retro_sessions (
           id text primary key,
           user_id text not null references retro_users(id) on delete cascade,
