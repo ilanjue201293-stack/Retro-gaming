@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireUser } from "@/lib/auth";
+import { requireUser, SESSION_COOKIE, type AuthUser } from "@/lib/auth";
 import { cleanup, db, ensureSchema } from "@/lib/db";
-import { cleanRoomCode, makeId, makeRoomCode } from "@/lib/utils";
+import { cleanRoomCode, makeId, makeRoomCode, sha256 } from "@/lib/utils";
 import { requireRoomMember } from "@/lib/room";
 import { hockeyConfigure, hockeyStart, hockeyState, hockeyStop, hockeySync, type HockeyMode } from "@/lib/hockey-room";
 
@@ -23,14 +23,46 @@ async function roomState(code:string,userId:string) {
 }
 function pair(a:string,b:string):[string,string]{return a<b?[a,b]:[b,a]}
 
+// Hockey tourne plusieurs fois par seconde : ne surtout pas lancer ensureSchema/cleanup
+// ni les mises à jour de présence générales sur ce chemin temps réel.
+async function fastHockeyUser(req:NextRequest, code:string):Promise<AuthUser>{
+  const token=req.cookies.get(SESSION_COOKIE)?.value;
+  if(!token)throw new Error("AUTH_REQUIRED");
+  const result=await db().query<{id:string;username:string}>(
+    `select u.id,u.username
+     from retro_sessions s
+     join retro_users u on u.id=s.user_id
+     join retro_room_members m on m.user_id=u.id and m.room_code=$2
+     join retro_rooms r on r.code=m.room_code
+     where s.token_hash=$1 and s.expires_at>now() and r.expires_at>now()
+     limit 1`,
+    [sha256(token),code]
+  );
+  const user=result.rows[0];
+  if(!user)throw new Error("Tu n'es pas dans cette room.");
+  return user;
+}
+
 export async function POST(req:NextRequest){
   try{
-    await ensureSchema();
     const data=await payload(req);
     const action=String(data.action??"state");
-    const hockeyAction=action.startsWith("hockey");
-    if(!hockeyAction) await cleanup();
-    const user=await requireUser(req,!hockeyAction);
+
+    // Fast path Hockey : aucune migration, aucun cleanup, aucune écriture de présence.
+    if(action.startsWith("hockey")){
+      const code=cleanRoomCode(data.code);
+      const user=await fastHockeyUser(req,code);
+      if(action==="hockeyState") return NextResponse.json({ok:true,game:await hockeyState(code)});
+      if(action==="hockeyConfigure") return NextResponse.json({ok:true,game:await hockeyConfigure(code,user.id,data.mode==="2v2"?"2v2":"1v1" as HockeyMode)});
+      if(action==="hockeyStart") return NextResponse.json({ok:true,game:await hockeyStart(code,user.id)});
+      if(action==="hockeyStop") return NextResponse.json({ok:true,game:await hockeyStop(code,user.id)});
+      if(action==="hockeySync") return NextResponse.json({ok:true,game:await hockeySync(code,user.id,{x:data.x,y:data.y,vx:data.vx,vy:data.vy})});
+      throw new Error("Action hockey inconnue.");
+    }
+
+    await ensureSchema();
+    await cleanup();
+    const user=await requireUser(req);
 
     if(action==="create"){
       let code="";
@@ -41,6 +73,7 @@ export async function POST(req:NextRequest){
       }
       if(!code)throw new Error("Impossible de créer une room.");
       await db().query(`insert into retro_room_members (room_code,user_id) values ($1,$2)`,[code,user.id]);
+      await db().query(`insert into retro_hockey_games (room_code) values ($1) on conflict (room_code) do nothing`,[code]);
       return NextResponse.json({ok:true,room:await roomState(code,user.id)});
     }
     if(action==="join"){
@@ -62,12 +95,6 @@ export async function POST(req:NextRequest){
 
     const code=cleanRoomCode(data.code);
     await requireRoomMember(code,user);
-
-    if(action==="hockeyState") return NextResponse.json({ok:true,game:await hockeyState(code)});
-    if(action==="hockeyConfigure") return NextResponse.json({ok:true,game:await hockeyConfigure(code,user.id,data.mode==="2v2"?"2v2":"1v1" as HockeyMode)});
-    if(action==="hockeyStart") return NextResponse.json({ok:true,game:await hockeyStart(code,user.id)});
-    if(action==="hockeyStop") return NextResponse.json({ok:true,game:await hockeyStop(code,user.id)});
-    if(action==="hockeySync") return NextResponse.json({ok:true,game:await hockeySync(code,user.id,{x:data.x,y:data.y,vx:data.vx,vy:data.vy})});
 
     if(action==="state")return NextResponse.json({ok:true,room:await roomState(code,user.id)});
     if(action==="leave"){
