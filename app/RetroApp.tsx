@@ -4,6 +4,7 @@ import { FormEvent, useCallback, useEffect, useState } from "react";
 import RoomComms from "./RoomComms";
 import HockeyGame from "./HockeyGame";
 import PongGame from "./PongGame";
+import RpsGame from "./RpsGame";
 
 type User = { id: string; username: string };
 type Friend = { id: string; username: string; online: boolean };
@@ -101,7 +102,6 @@ export default function RetroApp() {
       setHockeyActive(false);
       return;
     }
-
     let alive = true;
     let busy = false;
     const poll = async () => {
@@ -123,12 +123,8 @@ export default function RetroApp() {
         busy = false;
       }
     };
-
     const id = window.setInterval(poll, 1000);
-    return () => {
-      alive = false;
-      window.clearInterval(id);
-    };
+    return () => { alive = false; window.clearInterval(id); };
   }, [room?.code]);
 
   const submitAuth = async (event: FormEvent) => {
@@ -136,18 +132,12 @@ export default function RetroApp() {
     try {
       setAuthBusy(true);
       setError("");
-      const data = await post("/api/auth", {
-        action: authMode,
-        username: authUsername,
-        password: authPassword,
-      });
+      const data = await post("/api/auth", { action: authMode, username: authUsername, password: authPassword });
       setUser(data.user);
       setAuthPassword("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erreur.");
-    } finally {
-      setAuthBusy(false);
-    }
+    } finally { setAuthBusy(false); }
   };
 
   const logout = async () => {
@@ -163,62 +153,43 @@ export default function RetroApp() {
     try {
       setError("");
       const data = await post("/api/friends", { action, ...extra });
-      setSocial({
-        friends: data.friends ?? [],
-        incoming: data.incoming ?? [],
-        outgoing: data.outgoing ?? [],
-        roomInvites: data.roomInvites ?? [],
-      });
+      setSocial({ friends: data.friends ?? [], incoming: data.incoming ?? [], outgoing: data.outgoing ?? [], roomInvites: data.roomInvites ?? [] });
       if (action === "request") setFriendName("");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Erreur.");
-    }
+    } catch (err) { setError(err instanceof Error ? err.message : "Erreur."); }
   };
 
   const createRoom = async () => {
     try {
-      setRoomBusy(true);
-      setError("");
+      setRoomBusy(true); setError("");
       const data = await post("/api/rooms", { action: "create" });
       setRoom(data.room);
       setHockeyActive(false);
       localStorage.setItem(ROOM_KEY, data.room.code);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Erreur.");
-    } finally {
-      setRoomBusy(false);
-    }
+    } catch (err) { setError(err instanceof Error ? err.message : "Erreur."); }
+    finally { setRoomBusy(false); }
   };
 
   const joinRoom = async (codeValue = joinCode) => {
     try {
-      setRoomBusy(true);
-      setError("");
+      setRoomBusy(true); setError("");
       const data = await post("/api/rooms", { action: "join", code: codeValue });
       setRoom(data.room);
       setHockeyActive(false);
       localStorage.setItem(ROOM_KEY, data.room.code);
       setJoinCode("");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Erreur.");
-    } finally {
-      setRoomBusy(false);
-    }
+    } catch (err) { setError(err instanceof Error ? err.message : "Erreur."); }
+    finally { setRoomBusy(false); }
   };
 
   const acceptInvite = async (inviteId: string) => {
     try {
-      setRoomBusy(true);
-      setError("");
+      setRoomBusy(true); setError("");
       const data = await post("/api/rooms", { action: "acceptInvite", inviteId });
       setRoom(data.room);
       setHockeyActive(false);
       localStorage.setItem(ROOM_KEY, data.room.code);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Erreur.");
-    } finally {
-      setRoomBusy(false);
-    }
+    } catch (err) { setError(err instanceof Error ? err.message : "Erreur."); }
+    finally { setRoomBusy(false); }
   };
 
   const leaveRoom = async () => {
@@ -234,14 +205,10 @@ export default function RetroApp() {
     try {
       await post("/api/rooms", { action: "invite", code: room.code, friendId: friend.id });
       setToast(`Invitation envoyée à ${friend.username}`);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Erreur.");
-    }
+    } catch (err) { setError(err instanceof Error ? err.message : "Erreur."); }
   };
 
-  if (authLoading) {
-    return <main className="centerScreen"><div className="spinner"/><p>Chargement…</p></main>;
-  }
+  if (authLoading) return <main className="centerScreen"><div className="spinner"/><p>Chargement…</p></main>;
 
   if (!user) {
     return <main className="authPage">
@@ -250,7 +217,6 @@ export default function RetroApp() {
         <h1>RETRO <span>GAMING</span></h1>
         <p>Un seul compte. Tes amis. Vos rooms. Vos jeux.</p>
       </section>
-
       <section className="authCard">
         <div className="authTabs">
           <button className={authMode === "login" ? "active" : ""} onClick={() => setAuthMode("login")}>Connexion</button>
@@ -282,14 +248,10 @@ export default function RetroApp() {
           <button className="ghostButton dangerText" onClick={() => void leaveRoom()}>Quitter</button>
         </header>
       )}
-
       {toast && !hockeyActive && <div className="topToast">{toast}</div>}
       {error && !hockeyActive && <div className="errorBox topError">{error}</div>}
-
       {hockeyActive ? (
-        <div className="hockeyFocusStage">
-          <HockeyGame room={room} user={user} onActiveChange={setHockeyActive}/>
-        </div>
+        <div className="hockeyFocusStage"><HockeyGame room={room} user={user} onActiveChange={setHockeyActive}/></div>
       ) : (
         <div className="roomLayout">
           <section className="roomMain">
@@ -297,22 +259,17 @@ export default function RetroApp() {
               <div><span className="kicker">ROOM PRIVÉE</span><h2>{room.members.length} membre{room.members.length > 1 ? "s" : ""}</h2></div>
               <span className="hostPill">{room.hostId === user.id ? "Tu es l'hôte" : `Hôte : ${room.members.find((member) => member.id === room.hostId)?.username ?? "?"}`}</span>
             </div>
-
             <div className="memberGrid">
               {room.members.map((member) => <div className="memberCard" key={member.id}>
                 <div className="avatar">{member.username.slice(0, 1).toUpperCase()}</div>
-                <div>
-                  <strong>{member.username}{member.id === user.id ? " (toi)" : ""}</strong>
-                  <small>{member.id === room.hostId ? "Hôte" : member.online ? "En ligne" : "Hors ligne"}</small>
-                </div>
+                <div><strong>{member.username}{member.id === user.id ? " (toi)" : ""}</strong><small>{member.id === room.hostId ? "Hôte" : member.online ? "En ligne" : "Hors ligne"}</small></div>
                 <span className={`presence ${member.online ? "online" : ""}`}/>
               </div>)}
             </div>
-
             <HockeyGame room={room} user={user} onActiveChange={setHockeyActive}/>
             <PongGame room={room} user={user}/>
+            <RpsGame room={room} user={user}/>
           </section>
-
           <aside className="roomSide">
             <section className="panel">
               <div className="panelHead"><strong>Inviter des amis</strong><small>{social.friends.length} ami{social.friends.length > 1 ? "s" : ""}</small></div>
@@ -328,114 +285,52 @@ export default function RetroApp() {
           </aside>
         </div>
       )}
-
       <RoomComms code={room.code} user={user}/>
     </main>;
   }
 
   return <main className="appShell">
     <header className="dashboardHeader">
-      <div>
-        <div className="brandSmall big">RETRO <span>GAMING</span></div>
-        <small>Connecté en tant que <strong>{user.username}</strong></small>
-      </div>
+      <div><div className="brandSmall big">RETRO <span>GAMING</span></div><small>Connecté en tant que <strong>{user.username}</strong></small></div>
       <button className="ghostButton" onClick={() => void logout()}>Déconnexion</button>
     </header>
-
     {error && <div className="errorBox topError">{error}</div>}
     {toast && <div className="topToast">{toast}</div>}
-
-    <section className="welcome">
-      <span className="kicker">TABLEAU DE BORD</span>
-      <h1>Salut, {user.username} 👋</h1>
-      <p>Crée une room, invite tes amis et lance une partie.</p>
-    </section>
-
+    <section className="welcome"><span className="kicker">TABLEAU DE BORD</span><h1>Salut, {user.username} 👋</h1><p>Crée une room, invite tes amis et lance une partie.</p></section>
     <div className="dashboardGrid">
       <section className="dashboardMain">
         <div className="actionGrid">
-          <div className="actionCard">
-            <span>＋</span><h3>Créer une room</h3><p>Crée un espace privé puis invite tes amis.</p>
-            <button className="primaryButton full" disabled={roomBusy} onClick={() => void createRoom()}>Créer</button>
-          </div>
-
-          <div className="actionCard">
-            <span>⌁</span><h3>Rejoindre avec un code</h3><p>Entre le code à 5 caractères envoyé par un ami.</p>
-            <form onSubmit={(event) => { event.preventDefault(); void joinRoom(); }}>
-              <input className="codeInput" value={joinCode} maxLength={5} onChange={(event) => setJoinCode(event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ""))} placeholder="ABCDE"/>
-              <button className="secondaryButton" disabled={roomBusy || joinCode.length !== 5}>Rejoindre</button>
-            </form>
-          </div>
+          <div className="actionCard"><span>＋</span><h3>Créer une room</h3><p>Crée un espace privé puis invite tes amis.</p><button className="primaryButton full" disabled={roomBusy} onClick={() => void createRoom()}>Créer</button></div>
+          <div className="actionCard"><span>⌁</span><h3>Rejoindre avec un code</h3><p>Entre le code à 5 caractères envoyé par un ami.</p><form onSubmit={(event) => { event.preventDefault(); void joinRoom(); }}><input className="codeInput" value={joinCode} maxLength={5} onChange={(event) => setJoinCode(event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ""))} placeholder="ABCDE"/><button className="secondaryButton" disabled={roomBusy || joinCode.length !== 5}>Rejoindre</button></form></div>
         </div>
-
         <section className="gamesPreview">
-          <div className="panelHead">
-            <div><span className="kicker">JEUX</span><h2>Bibliothèque</h2></div>
-            <span className="availablePill">2 JEUX</span>
-          </div>
+          <div className="panelHead"><div><span className="kicker">JEUX</span><h2>Bibliothèque</h2></div><span className="availablePill">3 JEUX</span></div>
           <div className="gameLibraryCard">
             <div className="gameLibraryIcon">🏒</div>
-            <div>
-              <small>ARCADE · MULTIJOUEUR</small>
-              <h3>Hockey Arcade</h3>
-              <p>Hockey vu du dessus avec palet physique. Joue en 1v1 ou 2v2, au doigt ou à la souris.</p>
-            </div>
+            <div><small>ARCADE · MULTIJOUEUR</small><h3>Hockey Arcade</h3><p>Hockey vu du dessus avec palet physique. Joue en 1v1 ou 2v2, au doigt ou à la souris.</p></div>
             <button className="primaryButton" disabled={roomBusy} onClick={() => void createRoom()}>Créer une room</button>
           </div>
           <div className="gameLibraryCard">
-            <div className="gameLibraryIcon">▮·▮</div>
-            <div>
-              <small>CLASSIQUE · 2 JOUEURS</small>
-              <h3>Pong</h3>
-              <p>Le Pong classique : deux raquettes verticales, une balle carrée et un duel en 1 contre 1.</p>
-            </div>
+            <div className="gameLibraryIcon pongMiniIcon"><i/></div>
+            <div><small>CLASSIQUE · 2 JOUEURS</small><h3>Pong</h3><p>Le Pong classique : deux raquettes verticales, une balle carrée et un duel en 1 contre 1.</p></div>
+            <button className="primaryButton" disabled={roomBusy} onClick={() => void createRoom()}>Créer une room</button>
+          </div>
+          <div className="gameLibraryCard">
+            <div className="gameLibraryIcon rpsMiniIcon">✊ ✋ ✌️</div>
+            <div><small>DUEL · 2 JOUEURS</small><h3>Pierre · Feuille · Ciseaux</h3><p>3 secondes pour choisir, puis Pierre, Feuille, Ciseaux et révélation simultanée.</p></div>
             <button className="primaryButton" disabled={roomBusy} onClick={() => void createRoom()}>Créer une room</button>
           </div>
         </section>
       </section>
-
       <aside className="socialColumn">
         <section className="panel">
           <div className="panelHead"><strong>Amis</strong><small>{social.friends.length}</small></div>
-          <form className="addFriend" onSubmit={(event) => { event.preventDefault(); void friendAction("request", { username: friendName }); }}>
-            <input value={friendName} onChange={(event) => setFriendName(event.target.value)} placeholder="Pseudo exact"/>
-            <button>Ajouter</button>
-          </form>
-          <div className="friendList">
-            {social.friends.map((friend) => <div className="friendRow" key={friend.id}>
-              <span className={`presence ${friend.online ? "online" : ""}`}/>
-              <div><strong>{friend.username}</strong><small>{friend.online ? "En ligne" : "Hors ligne"}</small></div>
-              <button className="tinyDanger" onClick={() => void friendAction("remove", { friendId: friend.id })}>×</button>
-            </div>)}
-            {!social.friends.length && <p className="mutedSmall">Aucun ami ajouté.</p>}
-          </div>
+          <form className="addFriend" onSubmit={(event) => { event.preventDefault(); void friendAction("request", { username: friendName }); }}><input value={friendName} onChange={(event) => setFriendName(event.target.value)} placeholder="Pseudo exact"/><button>Ajouter</button></form>
+          <div className="friendList">{social.friends.map((friend) => <div className="friendRow" key={friend.id}><span className={`presence ${friend.online ? "online" : ""}`}/><div><strong>{friend.username}</strong><small>{friend.online ? "En ligne" : "Hors ligne"}</small></div><button className="tinyDanger" onClick={() => void friendAction("remove", { friendId: friend.id })}>×</button></div>)}{!social.friends.length && <p className="mutedSmall">Aucun ami ajouté.</p>}</div>
         </section>
-
-        {social.incoming.length > 0 && <section className="panel">
-          <div className="panelHead"><strong>Demandes reçues</strong><small>{social.incoming.length}</small></div>
-          {social.incoming.map((request) => <div className="requestRow" key={request.id}>
-            <strong>{request.username}</strong>
-            <div>
-              <button onClick={() => void friendAction("accept", { requestId: request.id })}>Accepter</button>
-              <button className="decline" onClick={() => void friendAction("decline", { requestId: request.id })}>Refuser</button>
-            </div>
-          </div>)}
-        </section>}
-
-        {social.outgoing.length > 0 && <section className="panel">
-          <div className="panelHead"><strong>Demandes envoyées</strong><small>{social.outgoing.length}</small></div>
-          {social.outgoing.map((request) => <div className="pendingRow" key={request.id}>
-            <strong>{request.username}</strong><small>En attente</small>
-          </div>)}
-        </section>}
-
-        {social.roomInvites.length > 0 && <section className="panel invitesPanel">
-          <div className="panelHead"><strong>Invitations de room</strong><small>{social.roomInvites.length}</small></div>
-          {social.roomInvites.map((invite) => <div className="inviteCard" key={invite.id}>
-            <div><strong>{invite.sender_name}</strong><small>Room {invite.room_code}</small></div>
-            <button disabled={roomBusy} onClick={() => void acceptInvite(invite.id)}>Rejoindre</button>
-          </div>)}
-        </section>}
+        {social.incoming.length > 0 && <section className="panel"><div className="panelHead"><strong>Demandes reçues</strong><small>{social.incoming.length}</small></div>{social.incoming.map((request) => <div className="requestRow" key={request.id}><strong>{request.username}</strong><div><button onClick={() => void friendAction("accept", { requestId: request.id })}>Accepter</button><button className="decline" onClick={() => void friendAction("decline", { requestId: request.id })}>Refuser</button></div></div>)}</section>}
+        {social.outgoing.length > 0 && <section className="panel"><div className="panelHead"><strong>Demandes envoyées</strong><small>{social.outgoing.length}</small></div>{social.outgoing.map((request) => <div className="pendingRow" key={request.id}><strong>{request.username}</strong><small>En attente</small></div>)}</section>}
+        {social.roomInvites.length > 0 && <section className="panel invitesPanel"><div className="panelHead"><strong>Invitations de room</strong><small>{social.roomInvites.length}</small></div>{social.roomInvites.map((invite) => <div className="inviteCard" key={invite.id}><div><strong>{invite.sender_name}</strong><small>Room {invite.room_code}</small></div><button disabled={roomBusy} onClick={() => void acceptInvite(invite.id)}>Rejoindre</button></div>)}</section>}
       </aside>
     </div>
   </main>;
