@@ -271,6 +271,7 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [botDifficulty, setBotDifficulty] = useState<BotDifficulty>("normal");
+  const [focusSuppressed, setFocusSuppressed] = useState(false);
   const [clock, setClock] = useState(Date.now());
 
   const gameRef = useRef<Game | null>(null);
@@ -470,10 +471,16 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
   }, [room.code]);
 
   useEffect(() => {
-    const active = game?.status === "playing" || game?.status === "gameover";
+    const active = (game?.status === "playing" || game?.status === "gameover") && !focusSuppressed;
     document.body.classList.toggle("pong-match-active", Boolean(active));
     return () => document.body.classList.remove("pong-match-active");
-  }, [game?.status]);
+  }, [game?.status, focusSuppressed]);
+  useEffect(() => { if (game?.status === "lobby") setFocusSuppressed(false); }, [game?.status]);
+  useEffect(() => {
+    const returnToRoom = () => setFocusSuppressed(true);
+    window.addEventListener("retro:return-room", returnToRoom);
+    return () => window.removeEventListener("retro:return-room", returnToRoom);
+  }, []);
 
   useEffect(() => {
     if (!game || game.status === "lobby") {
@@ -717,6 +724,11 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
     } catch (startError) { setError(startError instanceof Error ? startError.message : "Impossible de lancer Pong."); }
     finally { setBusy(false); }
   };
+  const stop = async () => {
+    try { setBusy(true); setError(""); const data = await post({ action: "stop", code: room.code }); gameRef.current = data.game as Game; setGame(data.game as Game); setFocusSuppressed(false); }
+    catch (stopError) { setError(stopError instanceof Error ? stopError.message : "Impossible de revenir au lobby Pong."); }
+    finally { setBusy(false); }
+  };
 
   if (!game) return <section className="pongLobby"><div className="spinner"/><p>Chargement de Pong…</p>{error && <div className="errorBox">{error}</div>}</section>;
 
@@ -740,6 +752,8 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
     </section>;
   }
 
+  if (focusSuppressed) return <section className="gameInProgressCard"><div><span className="kicker">PONG EN COURS</span><h2>Partie en cours</h2><p>Tu es revenu dans la room. Pong continue en arrière-plan.</p></div><button className="primaryButton" onClick={() => setFocusSuppressed(false)}>Revenir au match</button></section>;
+
   const shown = frame ?? makeFrame(game.players, game.leftScore, game.rightScore);
   const left = game.players.find((player) => player.side === "left");
   const right = game.players.find((player) => player.side === "right");
@@ -757,7 +771,7 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
       <div className="pongPaddle pongPaddleLeft" style={{ top: `${leftPaddle.y * 100}%` }}/>
       <div className="pongPaddle pongPaddleRight" style={{ top: `${rightPaddle.y * 100}%` }}/>
       <div className="pongBall" style={{ left: `${shown.ball.x * 100}%`, top: `${shown.ball.y * 100}%` }}/>
-      {shown.winnerSide && <div className="pongWinner"><strong>{winner || "Joueur"} gagne</strong><span>{shown.leftScore} — {shown.rightScore}</span>{isHost && <button onClick={() => void start(Boolean(game.players.some((player) => player.isBot)))}>Rejouer</button>}</div>}
+      {shown.winnerSide && <div className="pongWinner"><strong>{winner || "Joueur"} gagne</strong><span>{shown.leftScore} — {shown.rightScore}</span>{isHost ? <div className="gameEndActions"><button onClick={() => void start(Boolean(game.players.some((player) => player.isBot)))}>Rejouer</button><button onClick={() => void stop()}>Lobby du jeu</button></div> : <small>En attente de l'hôte pour rejouer.</small>}</div>}
     </div>
     <div className="pongControlsHint">Glisse verticalement · clavier : ↑ ↓ ou W S</div>
     {error && <div className="errorBox">{error}</div>}

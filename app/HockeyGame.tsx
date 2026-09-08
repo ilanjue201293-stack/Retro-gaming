@@ -5,7 +5,7 @@ import { ChangeEvent, PointerEvent, useCallback, useEffect, useMemo, useRef, use
 type User = { id: string; username: string; avatarData?: string | null };
 type RoomMember = { id: string; username: string; online: boolean; joined_at: string };
 type Room = { code: string; hostId: string; members: RoomMember[] };
-type Mode = "1v1" | "2v2";
+type Mode = "1v1" | "2v1" | "2v2";
 type BotDifficulty = "easy" | "normal" | "hard";
 type Side = "left" | "right";
 type Player = { userId: string; username: string; avatarData?: string | null; side: Side; slot: number; isBot?: boolean; difficulty?: BotDifficulty };
@@ -38,7 +38,7 @@ type Simulation = {
   lastCheckpointLeft: number;
   lastCheckpointRight: number;
   timeoutResolved: boolean;
-  botState?: { phase: "setup" | "strike" | "recover"; until: number; aimY: number };
+  botStates?: Record<string, { phase: "setup" | "strike" | "recover"; until: number; aimY: number }>;
 };
 
 const ICE_SERVERS: RTCIceServer[] = [
@@ -64,6 +64,11 @@ const TIME_OPTIONS = [0, 60, 120, 180, 300, 600];
 const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
 const timeLabel = (seconds: number) => seconds === 0 ? "Sans limite" : `${seconds / 60} min`;
 const formatClock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.max(0, seconds % 60)).padStart(2, "0")}`;
+function teamCaps(mode: Mode, twoPlayerSide: Side) {
+  if (mode === "1v1") return { left: 1, right: 1 };
+  if (mode === "2v2") return { left: 2, right: 2 };
+  return twoPlayerSide === "left" ? { left: 2, right: 1 } : { left: 1, right: 2 };
+}
 
 async function post(payload: Record<string, unknown>) {
   const controller = new AbortController();
@@ -114,7 +119,7 @@ function compressAvatar(file: File): Promise<string> {
 }
 
 function initialPaddle(player: Player, mode: Mode): Paddle {
-  return { x: player.side === "left" ? 0.2 : 0.8, y: mode === "1v1" ? 0.5 : player.slot === 0 ? 0.34 : 0.66, vx: 0, vy: 0 };
+  return { x: player.side === "left" ? 0.2 : 0.8, y: player.slot < 0 ? 0.5 : player.slot === 0 ? 0.34 : 0.66, vx: 0, vy: 0 };
 }
 function clampPaddle(side: Side, x: number, y: number) {
   return { x: clamp(x, side === "left" ? 0.075 : 0.53, side === "left" ? 0.47 : 0.925), y: clamp(y, 0.085, 0.915) };
@@ -249,77 +254,82 @@ function predictPuck(puck: Puck, ageSeconds: number) {
   return { x: clamp(x, -0.04, 1.04), y: clamp(y, TOP_BOARD, BOTTOM_BOARD), vx, vy };
 }
 
-function updateHockeyBot(simulation: Simulation, game: Game, now: number) {
-  const bot = game.players.find((player) => player.isBot);
-  if (!bot) return;
-  const paddle = simulation.frame.paddles[bot.userId] ?? initialPaddle(bot, game.mode);
+function updateHockeyBots(simulation: Simulation, game: Game, now: number) {
+  const bots = game.players.filter((player) => player.isBot);
+  if (!bots.length) return;
+  simulation.botStates ||= {};
   const puck = simulation.frame.puck;
-  const difficulty = bot.difficulty ?? "normal";
-  const baseSpeed = difficulty === "easy" ? 0.40 : difficulty === "hard" ? 0.72 : 0.54;
-  const strikeSpeed = difficulty === "easy" ? 0.62 : difficulty === "hard" ? 1.02 : 0.78;
-  const aimError = difficulty === "easy" ? 0.10 : difficulty === "hard" ? 0.035 : 0.065;
-  const guardX = bot.side === "right" ? 0.82 : 0.18;
-  const direction = bot.side === "right" ? -1 : 1;
 
-  if (Date.now() < simulation.frame.pauseUntil) {
-    simulation.botState = { phase: "recover", until: now + 350, aimY: 0.5 };
-    simulation.targets[bot.userId] = { ...initialPaddle(bot, game.mode) };
-    return;
-  }
+  for (const bot of bots) {
+    const paddle = simulation.frame.paddles[bot.userId] ?? initialPaddle(bot, game.mode);
+    const difficulty = bot.difficulty ?? "normal";
+    const baseSpeed = difficulty === "easy" ? 0.40 : difficulty === "hard" ? 0.72 : 0.54;
+    const strikeSpeed = difficulty === "easy" ? 0.62 : difficulty === "hard" ? 1.02 : 0.78;
+    const aimError = difficulty === "easy" ? 0.10 : difficulty === "hard" ? 0.035 : 0.065;
+    const guardX = bot.side === "right" ? 0.82 : 0.18;
+    const guardY = bot.slot < 0 ? 0.5 : bot.slot === 0 ? 0.34 : 0.66;
+    const direction = bot.side === "right" ? -1 : 1;
 
-  let state = simulation.botState;
-  if (!state) state = simulation.botState = { phase: "setup", until: 0, aimY: puck.y };
-
-  const puckOnBotHalf = bot.side === "right" ? puck.x > 0.50 : puck.x < 0.50;
-  const behindX = puck.x - direction * 0.115;
-  const strikeX = puck.x + direction * 0.105;
-  const wobble = Math.sin(now / 530 + game.leftScore * 1.9 + game.rightScore * 1.3) * aimError;
-
-  let desiredX = guardX;
-  let desiredY = clamp(puck.y + wobble, 0.12, 0.88);
-  let speed = baseSpeed;
-
-  if (!puckOnBotHalf && state.phase !== "strike") {
-    state.phase = "recover";
-    state.until = now + 280;
-  }
-
-  if (state.phase === "recover") {
-    desiredX = guardX;
-    desiredY = clamp(0.5 + wobble * 0.5, 0.22, 0.78);
-    if (now >= state.until && Math.hypot(paddle.x - guardX, paddle.y - desiredY) < 0.08) {
-      state.phase = "setup";
-      state.aimY = puck.y;
+    if (Date.now() < simulation.frame.pauseUntil) {
+      simulation.botStates[bot.userId] = { phase: "recover", until: now + 350, aimY: guardY };
+      simulation.targets[bot.userId] = { ...initialPaddle(bot, game.mode) };
+      continue;
     }
-  } else if (state.phase === "setup") {
-    desiredX = clampPaddle(bot.side, behindX, puck.y).x;
-    desiredY = clamp(puck.y + wobble, 0.12, 0.88);
-    const distanceToSetup = Math.hypot(paddle.x - desiredX, paddle.y - desiredY);
-    if (puckOnBotHalf && distanceToSetup < 0.045) {
-      state.phase = "strike";
-      state.until = now + (difficulty === "hard" ? 180 : difficulty === "easy" ? 135 : 155);
-      state.aimY = clamp(puck.y + wobble, 0.12, 0.88);
-    }
-  } else {
-    desiredX = clampPaddle(bot.side, strikeX, state.aimY).x;
-    desiredY = state.aimY;
-    speed = strikeSpeed;
-    if (now >= state.until) {
+
+    let state = simulation.botStates[bot.userId];
+    if (!state) state = simulation.botStates[bot.userId] = { phase: "setup", until: 0, aimY: puck.y };
+
+    const puckOnBotHalf = bot.side === "right" ? puck.x > 0.50 : puck.x < 0.50;
+    const behindX = puck.x - direction * 0.115;
+    const strikeX = puck.x + direction * 0.105;
+    const wobble = Math.sin(now / 530 + game.leftScore * 1.9 + game.rightScore * 1.3 + bot.slot * 1.7) * aimError;
+
+    let desiredX = guardX;
+    let desiredY = clamp(puck.y + wobble, 0.12, 0.88);
+    let speed = baseSpeed;
+
+    if (!puckOnBotHalf && state.phase !== "strike") {
       state.phase = "recover";
-      state.until = now + (difficulty === "hard" ? 260 : difficulty === "easy" ? 480 : 360);
+      state.until = now + 280;
     }
-  }
 
-  const dt = clamp((now - simulation.lastTs) / 1000, 0.008, 0.032);
-  const dx = desiredX - paddle.x, dy = desiredY - paddle.y, distance = Math.hypot(dx, dy);
-  const maxMove = speed * dt;
-  const factor = distance > maxMove && distance > 0.0001 ? maxMove / distance : 1;
-  const point = clampPaddle(bot.side, paddle.x + dx * factor, paddle.y + dy * factor);
-  simulation.targets[bot.userId] = {
-    x: point.x, y: point.y,
-    vx: (point.x - paddle.x) / Math.max(dt, 0.001),
-    vy: (point.y - paddle.y) / Math.max(dt, 0.001),
-  };
+    if (state.phase === "recover") {
+      desiredX = guardX;
+      desiredY = clamp(guardY + wobble * 0.5, 0.16, 0.84);
+      if (now >= state.until && Math.hypot(paddle.x - guardX, paddle.y - desiredY) < 0.08) {
+        state.phase = "setup";
+        state.aimY = puck.y;
+      }
+    } else if (state.phase === "setup") {
+      desiredX = clampPaddle(bot.side, behindX, puck.y).x;
+      desiredY = clamp(puck.y + wobble, 0.12, 0.88);
+      const distanceToSetup = Math.hypot(paddle.x - desiredX, paddle.y - desiredY);
+      if (puckOnBotHalf && distanceToSetup < 0.045) {
+        state.phase = "strike";
+        state.until = now + (difficulty === "hard" ? 180 : difficulty === "easy" ? 135 : 155);
+        state.aimY = clamp(puck.y + wobble, 0.12, 0.88);
+      }
+    } else {
+      desiredX = clampPaddle(bot.side, strikeX, state.aimY).x;
+      desiredY = state.aimY;
+      speed = strikeSpeed;
+      if (now >= state.until) {
+        state.phase = "recover";
+        state.until = now + (difficulty === "hard" ? 260 : difficulty === "easy" ? 480 : 360);
+      }
+    }
+
+    const dt = clamp((now - simulation.lastTs) / 1000, 0.008, 0.032);
+    const dx = desiredX - paddle.x, dy = desiredY - paddle.y, distance = Math.hypot(dx, dy);
+    const maxMove = speed * dt;
+    const factor = distance > maxMove && distance > 0.0001 ? maxMove / distance : 1;
+    const point = clampPaddle(bot.side, paddle.x + dx * factor, paddle.y + dy * factor);
+    simulation.targets[bot.userId] = {
+      x: point.x, y: point.y,
+      vx: (point.x - paddle.x) / Math.max(dt, 0.001),
+      vy: (point.y - paddle.y) / Math.max(dt, 0.001),
+    };
+  }
 }
 
 export default function HockeyGame({ room, user }: { room: Room; user: User; onActiveChange?: (active: boolean) => void }) {
@@ -327,6 +337,9 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [botDifficulty, setBotDifficulty] = useState<BotDifficulty>("normal");
+  const [teamAssignments, setTeamAssignments] = useState<Record<string, Side | "bench">>({});
+  const [twoPlayerSide, setTwoPlayerSide] = useState<Side>("left");
+  const [focusSuppressed, setFocusSuppressed] = useState(false);
   const [frame, setFrame] = useState<Frame | null>(null);
   const [avatarData, setAvatarData] = useState<string | null>(user.avatarData ?? null);
   const [avatarBusy, setAvatarBusy] = useState(false);
@@ -359,10 +372,58 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
   const right = useMemo(() => game?.players.filter((player) => player.side === "right") ?? [], [game]);
   const rosterKey = useMemo(() => game?.players.map((player) => player.userId).join(",") ?? "", [game?.players]);
   const isHost = room.hostId === user.id;
-  const needed = game?.mode === "2v2" ? 4 : 2;
-  const online = room.members.filter((member) => member.online).length;
+  const needed = game?.mode === "2v2" ? 4 : game?.mode === "2v1" ? 3 : 2;
+  const onlineMembers = useMemo(() => room.members.filter((member) => member.online), [room.members]);
+  const online = onlineMembers.length;
+  const caps = teamCaps(game?.mode ?? "1v1", twoPlayerSide);
+  const leftHumans = onlineMembers.filter((member) => teamAssignments[member.id] === "left").length;
+  const rightHumans = onlineMembers.filter((member) => teamAssignments[member.id] === "right").length;
+  const selectedHumans = leftHumans + rightHumans;
+  const missingBots = Math.max(0, caps.left - leftHumans) + Math.max(0, caps.right - rightHumans);
 
   const applyGame = useCallback((next: Game) => { gameRef.current = next; setGame(next); setError(""); }, []);
+  useEffect(() => {
+    if (!game || game.status !== "lobby" || !isHost) return;
+    const currentCaps = teamCaps(game.mode, twoPlayerSide);
+    setTeamAssignments((previous) => {
+      const next: Record<string, Side | "bench"> = {};
+      let leftCount = 0, rightCount = 0;
+      for (const member of onlineMembers) {
+        const old = previous[member.id];
+        if (old === "left" && leftCount < currentCaps.left) { next[member.id] = "left"; leftCount++; }
+        else if (old === "right" && rightCount < currentCaps.right) { next[member.id] = "right"; rightCount++; }
+        else next[member.id] = "bench";
+      }
+      for (const member of onlineMembers) {
+        if (next[member.id] !== "bench") continue;
+        if (leftCount < currentCaps.left) { next[member.id] = "left"; leftCount++; }
+        else if (rightCount < currentCaps.right) { next[member.id] = "right"; rightCount++; }
+      }
+      return next;
+    });
+  }, [game?.status, game?.mode, isHost, onlineMembers, twoPlayerSide]);
+
+  const assignTeam = useCallback((memberId: string, side: Side | "bench") => {
+    if (!game) return;
+    setTeamAssignments((previous) => {
+      const next = { ...previous };
+      if (side === "bench") { next[memberId] = "bench"; return next; }
+      const currentCaps = teamCaps(game.mode, twoPlayerSide);
+      const used = onlineMembers.filter((member) => member.id !== memberId && next[member.id] === side).length;
+      if (used >= currentCaps[side]) return next;
+      next[memberId] = side;
+      return next;
+    });
+  }, [game, onlineMembers, twoPlayerSide]);
+
+  useEffect(() => {
+    if (game?.status === "lobby") setFocusSuppressed(false);
+  }, [game?.status]);
+  useEffect(() => {
+    const returnToRoom = () => setFocusSuppressed(true);
+    window.addEventListener("retro:return-room", returnToRoom);
+    return () => window.removeEventListener("retro:return-room", returnToRoom);
+  }, []);
   const resetLocalToStart = useCallback((current: Game) => {
     const own = current.players.find((player) => player.userId === user.id); if (!own) return;
     const paddle = initialPaddle(own, current.mode);
@@ -462,7 +523,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
     void poll(); return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };
   }, [room.code]);
 
-  useEffect(() => { const active = game?.status === "playing" || game?.status === "gameover"; document.body.classList.toggle("hockey-match-active", Boolean(active)); return () => document.body.classList.remove("hockey-match-active"); }, [game?.status]);
+  useEffect(() => { const active = (game?.status === "playing" || game?.status === "gameover") && !focusSuppressed; document.body.classList.toggle("hockey-match-active", Boolean(active)); return () => document.body.classList.remove("hockey-match-active"); }, [game?.status, focusSuppressed]);
 
   useEffect(() => {
     if (!game || game.status === "lobby") { closeAllPeers(); simulationRef.current = null; remoteSnapshotRef.current = null; signalCursorRef.current = 0; localInputRef.current = null; localPaddleRef.current = null; draggingRef.current = false; setFrame(null); return; }
@@ -505,7 +566,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
       const current = gameRef.current, simulation = simulationRef.current;
       if (!current || !simulation || current.status === "lobby" || room.hostId !== user.id) return;
       if (Date.now() >= simulation.frame.pauseUntil) { const local = localInputRef.current; if (local) { const own = current.players.find((player) => player.userId === user.id); if (own) simulation.targets[user.id] = { ...local }; } }
-      updateHockeyBot(simulation, current, now);
+      updateHockeyBots(simulation, current, now);
 
       let suddenDeath = false;
       if (!simulation.frame.winnerSide && current.endsAt && Date.now() >= current.endsAt) {
@@ -579,15 +640,36 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
     catch (actionError) { setError(actionError instanceof Error ? actionError.message : "Erreur."); }
     finally { setBusy(false); }
   };
-  const start = async (withBot = false) => { try { setBusy(true); signalCursorRef.current = 0; closeAllPeers(); applyGame((await post({ action: "hockeyStart", code: room.code, botDifficulty: withBot ? botDifficulty : null })).game as Game); setClock(Date.now()); } catch (actionError) { setError(actionError instanceof Error ? actionError.message : "Erreur."); } finally { setBusy(false); } };
+  const start = async (fillBots = false, assignments: Record<string, Side | "bench"> = teamAssignments, twoSide: Side = twoPlayerSide, difficulty: BotDifficulty = botDifficulty) => {
+    try {
+      setBusy(true); signalCursorRef.current = 0; closeAllPeers(); setFocusSuppressed(false);
+      applyGame((await post({ action: "hockeyStart", code: room.code, fillBots, botDifficulty: fillBots ? difficulty : null, teamAssignments: assignments, twoPlayerSide: twoSide })).game as Game);
+      setClock(Date.now());
+    } catch (actionError) { setError(actionError instanceof Error ? actionError.message : "Erreur."); }
+    finally { setBusy(false); }
+  };
+  const stop = async () => {
+    try { setBusy(true); setFocusSuppressed(false); applyGame((await post({ action: "hockeyStop", code: room.code })).game as Game); }
+    catch (actionError) { setError(actionError instanceof Error ? actionError.message : "Impossible de revenir au lobby du hockey."); }
+    finally { setBusy(false); }
+  };
+  const replay = async () => {
+    if (!game) return;
+    const assignments = Object.fromEntries(game.players.filter((player) => !player.isBot).map((player) => [player.userId, player.side])) as Record<string, Side | "bench">;
+    const leftCount = game.players.filter((player) => player.side === "left").length;
+    const replayTwoSide: Side = game.mode === "2v1" && leftCount !== 2 ? "right" : "left";
+    const bot = game.players.find((player) => player.isBot);
+    await start(Boolean(bot), assignments, replayTwoSide, bot?.difficulty ?? botDifficulty);
+  };
 
   if (!game) return <section className="hockeyLobby"><div className="spinner"/><p>Chargement du hockey…</p>{error && <div className="errorBox">{error}</div>}</section>;
 
   if (game.status === "lobby") {
     return <section className="hockeyLobby">
       <div className="hockeyHero"><div className="hockeyDisc">🏒</div><div><span className="kicker">HOCKEY ARCADE</span><h2>Hockey sur glace</h2><p>Choisis le mode puis lance la partie.</p></div></div>
-      <div className="modePicker">
+      <div className="modePicker hockeyModePicker3">
         <button className={game.mode === "1v1" ? "selected" : ""} disabled={!isHost || busy} onClick={() => void configure("1v1", game.targetScore, game.timeLimitSec)}><strong>1 VS 1</strong><small>2 joueurs</small></button>
+        <button className={game.mode === "2v1" ? "selected" : ""} disabled={!isHost || busy} onClick={() => void configure("2v1", game.targetScore, game.timeLimitSec)}><strong>2 VS 1</strong><small>3 joueurs</small></button>
         <button className={game.mode === "2v2" ? "selected" : ""} disabled={!isHost || busy} onClick={() => void configure("2v2", game.targetScore, game.timeLimitSec)}><strong>2 VS 2</strong><small>4 joueurs</small></button>
       </div>
       <div className="hockeyRuleSettings">
@@ -600,11 +682,18 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
         <label className={`hockeyAvatarButton ${avatarBusy ? "disabled" : ""}`}>{avatarBusy ? "Préparation…" : avatarData ? "Changer" : "Choisir une photo"}<input type="file" accept="image/*" disabled={avatarBusy} onChange={(event) => void uploadAvatar(event)}/></label>
         {avatarData && <button className="hockeyAvatarRemove" disabled={avatarBusy} onClick={() => void removeAvatar()}>Retirer</button>}
       </div>
-      <div className="hockeyReadyBar"><span>{online}/{needed} joueurs connectés</span>{isHost ? <button className="primaryButton" disabled={busy || online < needed} onClick={() => void start(false)}>{busy ? "Lancement…" : `Lancer le ${game.mode}`}</button> : <small>En attente de l'hôte…</small>}</div>
-      {isHost && game.mode === "1v1" && online === 1 && <div className="botPlayPanel"><div><strong>🤖 Personne avec qui jouer ?</strong><small>Lance un 1v1 contre un bot.</small></div><select value={botDifficulty} onChange={(event) => setBotDifficulty(event.target.value as BotDifficulty)}><option value="easy">Facile</option><option value="normal">Normal</option><option value="hard">Difficile</option></select><button disabled={busy} onClick={() => void start(true)}>Jouer contre le bot</button></div>}
+      {isHost && <div className="hockeyTeamSetup">
+        <div className="hockeyTeamSetupHead"><div><strong>Équipes</strong><small>Choisis qui joue en bleu, rouge ou reste sur le banc.</small></div>{game.mode === "2v1" && <div className="twoPlayerSidePicker"><span>Équipe à 2</span><button className={twoPlayerSide === "left" ? "active blue" : ""} onClick={() => setTwoPlayerSide("left")}>BLEU</button><button className={twoPlayerSide === "right" ? "active red" : ""} onClick={() => setTwoPlayerSide("right")}>ROUGE</button></div>}</div>
+        <div className="hockeyTeamRows">{onlineMembers.map((member) => <div className="hockeyTeamRow" key={member.id}><strong>{member.username}{member.id === user.id ? " (toi)" : ""}</strong><div><button className={teamAssignments[member.id] === "left" ? "selected blue" : ""} onClick={() => assignTeam(member.id, "left")}>BLEU</button><button className={teamAssignments[member.id] === "right" ? "selected red" : ""} onClick={() => assignTeam(member.id, "right")}>ROUGE</button><button className={teamAssignments[member.id] === "bench" ? "selected bench" : ""} onClick={() => assignTeam(member.id, "bench")}>BANC</button></div></div>)}</div>
+        <div className="hockeyTeamCounts"><span className={leftHumans === caps.left ? "full" : ""}>Bleu {leftHumans}/{caps.left}</span><span className={rightHumans === caps.right ? "full" : ""}>Rouge {rightHumans}/{caps.right}</span></div>
+      </div>}
+      <div className="hockeyReadyBar"><span>{selectedHumans}/{needed} places humaines remplies</span>{isHost && missingBots === 0 ? <button className="primaryButton" disabled={busy} onClick={() => void start(false)}>{busy ? "Lancement…" : `Lancer le ${game.mode}`}</button> : !isHost ? <small>En attente de l'hôte…</small> : <small>{missingBots} place{missingBots > 1 ? "s" : ""} libre{missingBots > 1 ? "s" : ""}</small>}</div>
+      {isHost && missingBots > 0 && selectedHumans > 0 && <div className="botPlayPanel"><div><strong>🤖 Compléter avec des bots</strong><small>Ajoute automatiquement {missingBots} bot{missingBots > 1 ? "s" : ""} dans les places libres.</small></div><select value={botDifficulty} onChange={(event) => setBotDifficulty(event.target.value as BotDifficulty)}><option value="easy">Facile</option><option value="normal">Normal</option><option value="hard">Difficile</option></select><button disabled={busy} onClick={() => void start(true)}>Compléter et lancer</button></div>}
       {error && <div className="errorBox">{error}</div>}
     </section>;
   }
+
+  if (focusSuppressed) return <section className="gameInProgressCard"><div><span className="kicker">HOCKEY EN COURS</span><h2>Match en cours</h2><p>Tu es revenu dans la room. Le match continue en arrière-plan.</p></div><button className="primaryButton" onClick={() => setFocusSuppressed(false)}>Revenir au match</button></section>;
 
   const fallback = makeFrame(game.players, game.mode, game.leftScore, game.rightScore);
   const shown = frame ?? fallback;
@@ -627,7 +716,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
         })}
         <div className="hockeyPuck" style={{ left: `${shown.puck.x * 100}%`, top: `${shown.puck.y * 100}%`, transition: "none" }}/>
         {countdown > 0 && <div className="hockeyCountdown"><b>{countdown}</b><span>REPRISE</span></div>}
-        {shown.winnerSide && <div className="hockeyWinnerOverlay"><span>🏆</span><h2>{winners || "Équipe"} gagne !</h2><p>{shown.leftScore} — {shown.rightScore}</p></div>}
+        {shown.winnerSide && <div className="hockeyWinnerOverlay"><span>🏆</span><h2>{winners || "Équipe"} gagne !</h2><p>{shown.leftScore} — {shown.rightScore}</p>{isHost ? <div className="gameEndActions"><button className="primaryButton" disabled={busy} onClick={() => void replay()}>Rejouer</button><button className="secondaryButton" disabled={busy} onClick={() => void stop()}>Lobby du jeu</button></div> : <small>En attente de l'hôte pour rejouer.</small>}</div>}
       </div>
     </div>
     {error && <div className="errorBox hockeyGameError">{error}</div>}

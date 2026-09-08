@@ -55,6 +55,7 @@ export default function RpsGame({ room, user }: { room: Room; user: User }) {
   const [game, setGame] = useState<Game | null>(null);
   const [busy, setBusy] = useState(false);
   const [botDifficulty, setBotDifficulty] = useState<BotDifficulty>("normal");
+  const [focusSuppressed, setFocusSuppressed] = useState(false);
   const [error, setError] = useState("");
   const [clock, setClock] = useState(Date.now());
   const gameRef = useRef<Game | null>(null);
@@ -97,10 +98,16 @@ export default function RpsGame({ room, user }: { room: Room; user: User }) {
   }, [room.code, game?.status]);
 
   useEffect(() => {
-    const active = game?.status === "playing" || game?.status === "gameover";
+    const active = (game?.status === "playing" || game?.status === "gameover") && !focusSuppressed;
     document.body.classList.toggle("rps-match-active", Boolean(active));
     return () => document.body.classList.remove("rps-match-active");
-  }, [game?.status]);
+  }, [game?.status, focusSuppressed]);
+  useEffect(() => { if (game?.status === "lobby") setFocusSuppressed(false); }, [game?.status]);
+  useEffect(() => {
+    const returnToRoom = () => setFocusSuppressed(true);
+    window.addEventListener("retro:return-room", returnToRoom);
+    return () => window.removeEventListener("retro:return-room", returnToRoom);
+  }, []);
 
   const isHost = room.hostId === user.id;
   const online = room.members.filter((member) => member.online).length;
@@ -190,6 +197,8 @@ export default function RpsGame({ room, user }: { room: Room; user: User }) {
     </section>;
   }
 
+  if (focusSuppressed) return <section className="gameInProgressCard"><div><span className="kicker">DUEL EN COURS</span><h2>Pierre · Feuille · Ciseaux</h2><p>Tu es revenu dans la room. Le duel continue en arrière-plan.</p></div><button className="primaryButton" onClick={() => setFocusSuppressed(false)}>Revenir au duel</button></section>;
+
   const result = game.lastResult;
   const winnerName = game.winnerSide === "left" ? left?.username : game.winnerSide === "right" ? right?.username : null;
 
@@ -238,7 +247,7 @@ export default function RpsGame({ room, user }: { room: Room; user: User }) {
         <small>DUEL TERMINÉ</small>
         <h2>{winnerName ? `${winnerName} gagne !` : "Match nul !"}</h2>
         <div className="rpsFinalScore"><b>{game.leftScore}</b><span>—</span><b>{game.rightScore}</b></div>
-        {isHost && <button className="primaryButton" disabled={busy} onClick={() => void stop()}>Retour aux jeux</button>}
+        {isHost ? <div className="gameEndActions"><button className="primaryButton" disabled={busy} onClick={() => void start(Boolean(game.players.some((player) => player.isBot)))}>Rejouer</button><button className="secondaryButton" disabled={busy} onClick={() => void stop()}>Lobby du jeu</button></div> : <small>En attente de l'hôte pour rejouer.</small>}
       </div>}
     </div>
     {error && <div className="errorBox rpsGameError">{error}</div>}

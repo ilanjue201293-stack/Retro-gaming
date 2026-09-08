@@ -245,6 +245,7 @@ export default function RetroApp() {
           <button className="roomCode" onClick={() => navigator.clipboard?.writeText(room.code).then(() => setToast("Code copié"))}>
             <small>ROOM</small><strong>{room.code}</strong><span>⧉</span>
           </button>
+          <button className="ghostButton returnRoomButton" onClick={() => window.dispatchEvent(new Event("retro:return-room"))}>← Retour à la room</button>
           <button className="ghostButton dangerText" onClick={() => void leaveRoom()}>Quitter</button>
         </header>
       )}
@@ -307,7 +308,7 @@ export default function RetroApp() {
           <div className="panelHead"><div><span className="kicker">JEUX</span><h2>Bibliothèque</h2></div><span className="availablePill">3 JEUX</span></div>
           <div className="gameLibraryCard">
             <div className="gameLibraryIcon">🏒</div>
-            <div><small>ARCADE · MULTIJOUEUR</small><h3>Hockey Arcade</h3><p>Hockey vu du dessus avec palet physique. Joue en 1v1 ou 2v2, au doigt ou à la souris.</p></div>
+            <div><small>ARCADE · MULTIJOUEUR</small><h3>Hockey Arcade</h3><p>Hockey vu du dessus avec palet physique. Joue en 1v1, 2v1 ou 2v2, choisis les équipes et complète avec des bots.</p></div>
             <button className="primaryButton" disabled={roomBusy} onClick={() => void createRoom()}>Créer une room</button>
           </div>
           <div className="gameLibraryCard">

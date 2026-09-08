@@ -104,7 +104,7 @@ export async function POST(req: NextRequest) {
           game: await hockeyConfigure(
             code,
             user.id,
-            data.mode === "2v2" ? "2v2" : "1v1" as HockeyMode,
+            data.mode === "2v2" ? "2v2" : data.mode === "2v1" ? "2v1" : "1v1" as HockeyMode,
             targetScore,
             timeLimitSec
           ),
@@ -118,7 +118,12 @@ export async function POST(req: NextRequest) {
         await db().query(`update retro_rps_games set status='lobby',players='[]'::jsonb,round_index=0,left_score=0,right_score=0,choices='{}'::jsonb,phase='choosing',phase_started_at=null,phase_ends_at=null,last_result=null,winner_side=null,updated_at=now() where room_code=$1`, [code]).catch(() => undefined);
         const requestedBot = String(data.botDifficulty ?? "");
         const botDifficulty: BotDifficulty | null = requestedBot === "easy" || requestedBot === "normal" || requestedBot === "hard" ? requestedBot : null;
-        return NextResponse.json({ ok: true, game: await hockeyStart(code, user.id, botDifficulty) });
+        const rawAssignments = data.teamAssignments && typeof data.teamAssignments === "object" && !Array.isArray(data.teamAssignments) ? data.teamAssignments as Record<string, unknown> : {};
+        const teamAssignments: Record<string, "left" | "right" | "bench"> = {};
+        for (const [id, side] of Object.entries(rawAssignments)) if (side === "left" || side === "right" || side === "bench") teamAssignments[id] = side;
+        const twoPlayerSide = data.twoPlayerSide === "right" ? "right" : "left";
+        const fillBots = Boolean(data.fillBots);
+        return NextResponse.json({ ok: true, game: await hockeyStart(code, user.id, botDifficulty, teamAssignments, twoPlayerSide, fillBots) });
       }
 
       if (action === "hockeyStop") {

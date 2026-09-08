@@ -1,6 +1,6 @@
 import { db } from "./db";
 
-export type HockeyMode = "1v1" | "2v2";
+export type HockeyMode = "1v1" | "2v1" | "2v2";
 export type BotDifficulty = "easy" | "normal" | "hard";
 type Side = "left" | "right";
 type Player = { userId:string; username:string; avatarData?:string|null; side:Side; slot:number; isBot?:boolean; difficulty?:BotDifficulty };
@@ -14,7 +14,7 @@ const PUCK_R=.024, MALLET_R=.052, LEFT=.03, RIGHT=.97, TOP=.045, BOTTOM=.955, GO
 const clamp=(n:number,min:number,max:number)=>Math.max(min,Math.min(max,n));
 const finite=(n:unknown,f=0)=>{const v=Number(n);return Number.isFinite(v)?v:f};
 function cap(x:number,y:number,max:number){const s=Math.hypot(x,y);if(!Number.isFinite(s)||s<1e-6)return{x:0,y:0};if(s<=max)return{x,y};const k=max/s;return{x:x*k,y:y*k}}
-function initial(p:Player,mode:HockeyMode):Paddle{return{x:p.side==="left"?.2:.8,y:mode==="1v1"?.5:p.slot===0?.34:.66,vx:0,vy:0}}
+function initial(p:Player,mode:HockeyMode):Paddle{return{x:p.side==="left"?.2:.8,y:p.slot<0?.5:p.slot===0?.34:.66,vx:0,vy:0}}
 function clampPad(side:Side,x:number,y:number){return{x:clamp(x,side==="left"?.075:.53,side==="left"?.47:.925),y:clamp(y,.085,.915)}}
 function fresh(roster:Player[],mode:HockeyMode,now:number,leftScore=0,rightScore=0,winnerSide:Side|null=null):Frame{return{puck:{x:.5,y:.5,vx:0,vy:0},paddles:Object.fromEntries(roster.map(p=>[p.userId,initial(p,mode)])),leftScore,rightScore,winnerSide,pauseUntil:now+650}}
 function emptyStored(targetScore=DEFAULT_TARGET,timeLimitSec=0):Stored{return{roster:[],frame:null,inputs:{},lastTick:Date.now(),targetScore:clamp(Math.round(targetScore)||DEFAULT_TARGET,1,30),timeLimitSec:Math.max(0,Math.round(timeLimitSec)||0),startedAt:null}}
@@ -79,22 +79,42 @@ export async function hockeyConfigure(code:string,userId:string,mode:HockeyMode,
   await db().query(`update retro_hockey_games set mode=$1,status='lobby',players=$2::jsonb,left_score=0,right_score=0,winner_side=null,updated_at=now() where room_code=$3`,[mode,JSON.stringify(s),code]);
   return hockeyState(code);
 }
-export async function hockeyStart(code:string,userId:string,botDifficulty:BotDifficulty|null=null){
+export async function hockeyStart(code:string,userId:string,botDifficulty:BotDifficulty|null=null,teamAssignments:Record<string,"left"|"right"|"bench">={},twoPlayerSide:Side="left",fillBots=false){
   if(await host(code)!==userId)throw new Error("Seul l'hôte peut lancer le match.");
-  const r=await row(code),need=r.mode==="2v2"?4:2,current=decode(r.players,r);
+  const r=await row(code),current=decode(r.players,r);
+  const capacities=r.mode==="1v1"?{left:1,right:1}:r.mode==="2v2"?{left:2,right:2}:twoPlayerSide==="right"?{left:1,right:2}:{left:2,right:1};
+  const need=capacities.left+capacities.right;
   const members=await db().query<{id:string;username:string;avatar_data:string|null}>(`select u.id,u.username,u.avatar_data from retro_room_members m join retro_users u on u.id=m.user_id where m.room_code=$1 and m.last_seen>now()-interval '15 seconds' order by m.joined_at`,[code]);
-  let roster:Player[];
-  if(botDifficulty&&r.mode==="1v1"){
-    const human=members.rows.find((member)=>member.id===userId)??members.rows[0];
-    if(!human)throw new Error("Tu dois être dans la room pour jouer contre un bot.");
-    roster=[
-      {userId:human.id,username:human.username,avatarData:human.avatar_data,side:"left",slot:0},
-      {userId:"bot:hockey",username:"BOT",avatarData:null,side:"right",slot:0,isBot:true,difficulty:botDifficulty},
-    ];
+  const memberById=new Map(members.rows.map(m=>[m.id,m]));
+  const hasAssignments=Object.keys(teamAssignments||{}).length>0;
+  const chosen:{member:{id:string;username:string;avatar_data:string|null};side:Side}[]=[];
+  if(hasAssignments){
+    for(const [id,rawSide] of Object.entries(teamAssignments||{})){
+      if(rawSide!=="left"&&rawSide!=="right")continue;
+      const member=memberById.get(id);if(member)chosen.push({member,side:rawSide});
+    }
   }else{
-    if(members.rows.length<need)throw new Error(r.mode==="2v2"?"Il faut 4 joueurs connectés pour le 2v2.":"Il faut 2 joueurs connectés pour le 1v1.");
-    roster=members.rows.slice(0,need).map((m,i)=>({userId:m.id,username:m.username,avatarData:m.avatar_data,side:i%2===0?"left":"right",slot:r.mode==="2v2"?Math.floor(i/2):0}));
+    let left=0,right=0;
+    for(const member of members.rows.slice(0,need)){
+      if(left<capacities.left){chosen.push({member,side:"left"});left++;}
+      else if(right<capacities.right){chosen.push({member,side:"right"});right++;}
+    }
   }
+  const leftHumans=chosen.filter(v=>v.side==="left");
+  const rightHumans=chosen.filter(v=>v.side==="right");
+  if(leftHumans.length>capacities.left||rightHumans.length>capacities.right)throw new Error("Il y a trop de joueurs dans une des équipes.");
+  if(chosen.length===0)throw new Error("Sélectionne au moins un joueur humain.");
+  const missing=(capacities.left-leftHumans.length)+(capacities.right-rightHumans.length);
+  if(missing>0&&!fillBots)throw new Error(`Il manque ${missing} joueur${missing>1?"s":""}. Complète avec des bots ou change les équipes.`);
+  const difficulty:BotDifficulty=botDifficulty??"normal";
+  const roster:Player[]=[];
+  const buildSide=(side:Side,humans:typeof chosen,capacity:number)=>{
+    const entries:Player[]=humans.map(v=>({userId:v.member.id,username:v.member.username,avatarData:v.member.avatar_data,side,slot:0}));
+    while(entries.length<capacity){const index=entries.length;entries.push({userId:`bot:hockey:${side}:${index}`,username:`BOT ${side==="left"?"BLEU":"ROUGE"} ${index+1}`,avatarData:null,side,slot:0,isBot:true,difficulty});}
+    entries.forEach((player,index)=>{player.slot=entries.length===1?-1:index;roster.push(player);});
+  };
+  buildSide("left",leftHumans,capacities.left);
+  buildSide("right",rightHumans,capacities.right);
   const now=Date.now(),frame=fresh(roster,r.mode,now),inputs=Object.fromEntries(roster.map(p=>[p.userId,{...initial(p,r.mode),at:now}])),s:Stored={roster,frame,inputs,lastTick:now,targetScore:current.targetScore,timeLimitSec:current.timeLimitSec,startedAt:now};
   await db().query(`update retro_hockey_games set status='playing',players=$1::jsonb,left_score=0,right_score=0,winner_side=null,updated_at=now() where room_code=$2`,[JSON.stringify(s),code]);
   return output({...r,status:"playing",players:s,left_score:0,right_score:0,winner_side:null},s);
