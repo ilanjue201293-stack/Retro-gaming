@@ -2,6 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import RoomComms from "./RoomComms";
+import HockeyGame from "./HockeyGame";
 
 type User={id:string;username:string};
 type Friend={id:string;username:string;online:boolean};
@@ -42,17 +43,17 @@ export default function RetroApp(){
   useEffect(()=>{if(!toast)return;const id=setTimeout(()=>setToast(""),2800);return()=>clearTimeout(id)},[toast]);
 
   const refreshSocial=useCallback(async()=>{
-    if(!user||room)return;
+    if(!user)return;
     try{
       const data=await post("/api/friends",{action:"state"});
       setSocial({friends:data.friends??[],incoming:data.incoming??[],outgoing:data.outgoing??[],roomInvites:data.roomInvites??[]});
     }catch{}
-  },[user,room]);
+  },[user]);
 
   useEffect(()=>{
-    if(!user||room)return;void refreshSocial();
+    if(!user)return;void refreshSocial();
     const id=setInterval(()=>void refreshSocial(),3000);return()=>clearInterval(id);
-  },[user,room,refreshSocial]);
+  },[user,refreshSocial]);
 
   const refreshRoom=useCallback(async(code:string)=>{
     const data=await post("/api/rooms",{action:"state",code});setRoom(data.room);
@@ -138,7 +139,7 @@ export default function RetroApp(){
     <section className="authBrand">
       <div className="eyebrow">● MINI-JEUX PRIVÉS ENTRE AMIS</div>
       <h1>RETRO <span>GAMING</span></h1>
-      <p>Un seul compte. Tes amis. Vos rooms. Les jeux arrivent bientôt.</p>
+      <p>Un seul compte. Tes amis. Vos rooms. Vos jeux.</p>
     </section>
     <section className="authCard">
       <div className="authTabs">
@@ -182,13 +183,7 @@ export default function RetroApp(){
           </div>)}
         </div>
 
-        <div className="noGameCard">
-          <div className="pixelIcon">🕹️</div>
-          <span className="kicker">BIBLIOTHÈQUE DE JEUX</span>
-          <h2>Aucun jeu disponible pour l'instant</h2>
-          <p>La base sociale et les rooms sont prêtes. Les jeux seront ajoutés ici sans changer vos comptes ni vos amis.</p>
-          <div className="comingSoon">JEUX À VENIR</div>
-        </div>
+        <HockeyGame room={room} user={user}/>
       </section>
 
       <aside className="roomSide">
@@ -221,7 +216,7 @@ export default function RetroApp(){
     <section className="welcome">
       <span className="kicker">TABLEAU DE BORD</span>
       <h1>Salut, {user.username} 👋</h1>
-      <p>Crée une room ou rejoins tes amis. Les jeux arrivent bientôt.</p>
+      <p>Crée une room, invite tes amis et lance une partie.</p>
     </section>
 
     <div className="dashboardGrid">
@@ -241,8 +236,12 @@ export default function RetroApp(){
         </div>
 
         <section className="gamesPreview">
-          <div className="panelHead"><div><span className="kicker">JEUX</span><h2>Bibliothèque</h2></div><span className="soonPill">BIENTÔT</span></div>
-          <div className="emptyLibrary"><span>🕹️</span><strong>Aucun jeu pour le moment</strong><p>On ajoutera le premier jeu quand tu l'auras choisi.</p></div>
+          <div className="panelHead"><div><span className="kicker">JEUX</span><h2>Bibliothèque</h2></div><span className="availablePill">1 JEU</span></div>
+          <div className="gameLibraryCard">
+            <div className="gameLibraryIcon">🏒</div>
+            <div><small>ARCADE · MULTIJOUEUR</small><h3>Hockey Arcade</h3><p>Hockey vu du dessus avec palet physique. Joue en 1v1 ou 2v2, au doigt ou à la souris.</p></div>
+            <button className="primaryButton" disabled={roomBusy} onClick={()=>void createRoom()}>Créer une room</button>
+          </div>
         </section>
       </section>
 
