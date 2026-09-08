@@ -7,7 +7,7 @@ import { makeId, makeToken, sha256 } from "./utils";
 const scrypt = promisify(scryptCb);
 export const SESSION_COOKIE = "retro_session";
 const SESSION_DAYS = 30;
-export type AuthUser = { id: string; username: string };
+export type AuthUser = { id: string; username: string; avatarData: string | null };
 
 export async function hashPassword(password: string) {
   const salt = randomBytes(16).toString("hex");
@@ -46,8 +46,8 @@ export async function getAuthedUser(req: NextRequest, touchPresence = true): Pro
   await ensureSchema();
   const token = req.cookies.get(SESSION_COOKIE)?.value;
   if (!token) return null;
-  const result = await db().query<{ id: string; username: string }>(
-    `select u.id, u.username
+  const result = await db().query<{ id: string; username: string; avatarData: string | null }>(
+    `select u.id, u.username, u.avatar_data as "avatarData"
      from retro_sessions s join retro_users u on u.id = s.user_id
      where s.token_hash = $1 and s.expires_at > now() limit 1`,
     [sha256(token)]
