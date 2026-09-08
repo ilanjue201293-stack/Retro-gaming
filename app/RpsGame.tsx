@@ -26,6 +26,7 @@ type Game = {
 
 const LABELS: Record<Choice, string> = { rock: "PIERRE", paper: "FEUILLE", scissors: "CISEAUX" };
 const ICONS: Record<Choice, string> = { rock: "✊", paper: "✋", scissors: "✌️" };
+const SUBTITLES: Record<Choice, string> = { rock: "Écrase les ciseaux", paper: "Recouvre la pierre", scissors: "Coupe la feuille" };
 
 async function post(payload: Record<string, unknown>) {
   const controller = new AbortController();
@@ -58,7 +59,7 @@ export default function RpsGame({ room, user }: { room: Room; user: User }) {
 
   useEffect(() => { gameRef.current = game; }, [game]);
   useEffect(() => {
-    const id = window.setInterval(() => setClock(Date.now()), 80);
+    const id = window.setInterval(() => setClock(Date.now()), 70);
     return () => window.clearInterval(id);
   }, []);
 
@@ -81,7 +82,7 @@ export default function RpsGame({ room, user }: { room: Room; user: User }) {
       }
     };
     void poll();
-    const id = window.setInterval(poll, game?.status === "playing" ? 180 : 600);
+    const id = window.setInterval(poll, game?.status === "playing" ? 160 : 600);
     return () => { alive = false; window.clearInterval(id); };
   }, [room.code, game?.status]);
 
@@ -97,6 +98,7 @@ export default function RpsGame({ room, user }: { room: Room; user: User }) {
   const right = game?.players.find((player) => player.side === "right") ?? null;
   const me = game?.players.find((player) => player.userId === user.id) ?? null;
   const seconds = game?.phaseEndsAt ? Math.max(0, Math.ceil((game.phaseEndsAt - clock) / 1000)) : 0;
+  const currentRound = game ? Math.min(game.roundIndex + (game.phase === "reveal" || game.status === "gameover" ? 0 : 1), game.roundsTotal) : 1;
 
   const chant = useMemo(() => {
     if (!game || game.phase !== "chant" || !game.phaseStartedAt) return "";
@@ -127,13 +129,16 @@ export default function RpsGame({ room, user }: { room: Room; user: User }) {
   };
 
   const choose = async (choice: Choice) => {
-    if (busy || game?.phase !== "choosing") return;
+    if (busy || game?.phase !== "choosing" || game.myChoice) return;
+    const before = game;
+    setGame({ ...game, myChoice: choice });
     try {
       setBusy(true); setError("");
       const data = await post({ action: "choose", code: room.code, choice });
       setGame(data.game as Game);
     } catch (actionError) {
-      setError(actionError instanceof Error ? actionError.message : "Erreur.");
+      setGame(before);
+      setError(actionError instanceof Error ? actionError.message : "Impossible d'enregistrer ton choix.");
     } finally { setBusy(false); }
   };
 
@@ -150,19 +155,19 @@ export default function RpsGame({ room, user }: { room: Room; user: User }) {
   if (!game) return <section className="rpsLobby"><div className="spinner"/><p>Chargement de Pierre‑Feuille‑Ciseaux…</p>{error && <div className="errorBox">{error}</div>}</section>;
 
   if (game.status === "lobby") {
-    return <section className="rpsLobby">
-      <div className="rpsLobbyIcon"><span>✊</span><span>✋</span><span>✌️</span></div>
+    return <section className="rpsLobby rpsLobbyV2">
+      <div className="rpsLobbyMark"><div><span>✊</span><span>✋</span><span>✌️</span></div></div>
       <div className="rpsLobbyCopy">
         <span className="kicker">DUEL · 2 JOUEURS</span>
         <h2>Pierre · Feuille · Ciseaux</h2>
-        <p>3 secondes pour choisir, puis révélation simultanée.</p>
+        <p>Choisis en secret. Au bout de 3 secondes : Pierre, Feuille, Ciseaux… révélation.</p>
         <div className="rpsRoundPicker">
-          <small>Nombre de manches</small>
+          <small>NOMBRE DE MANCHES</small>
           <div>{[1,3,5,7,10,15].map((rounds) => <button key={rounds} className={game.roundsTotal === rounds ? "selected" : ""} disabled={!isHost || busy} onClick={() => void configure(rounds)}>{rounds}</button>)}</div>
         </div>
       </div>
       <div className="rpsReady">
-        <span>{online}/2 joueurs connectés</span>
+        <div className="rpsOnline"><i className={online === 2 ? "ready" : ""}/><span>{online}/2 connectés</span></div>
         {isHost ? <button className="primaryButton" disabled={busy || online !== 2} onClick={() => void start()}>{busy ? "Lancement…" : "Lancer le duel"}</button> : <small>En attente de l'hôte…</small>}
       </div>
       {error && <div className="errorBox rpsLobbyError">{error}</div>}
@@ -172,38 +177,54 @@ export default function RpsGame({ room, user }: { room: Room; user: User }) {
   const result = game.lastResult;
   const winnerName = game.winnerSide === "left" ? left?.username : game.winnerSide === "right" ? right?.username : null;
 
-  return <section className="rpsGameWrap">
-    <div className="rpsScoreBar">
-      <div><small>{left?.username ?? "Joueur 1"}</small><strong>{game.leftScore}</strong></div>
-      <span>Manche {Math.min(game.roundIndex + (game.phase === "reveal" ? 0 : 1), game.roundsTotal)}/{game.roundsTotal}</span>
-      <div><strong>{game.rightScore}</strong><small>{right?.username ?? "Joueur 2"}</small></div>
+  return <section className="rpsGameWrap rpsGameV2">
+    <div className="rpsScoreBar rpsScoreV2">
+      <div className="rpsPlayerScore left"><span className="rpsAvatar">{left?.username.slice(0,1).toUpperCase() ?? "1"}</span><div><small>{left?.username ?? "Joueur 1"}</small><strong>{game.leftScore}</strong></div></div>
+      <div className="rpsRoundBadge"><small>MANCHE</small><strong>{currentRound}<i>/</i>{game.roundsTotal}</strong></div>
+      <div className="rpsPlayerScore right"><div><small>{right?.username ?? "Joueur 2"}</small><strong>{game.rightScore}</strong></div><span className="rpsAvatar">{right?.username.slice(0,1).toUpperCase() ?? "2"}</span></div>
     </div>
 
-    <div className="rpsArena">
-      {game.status === "playing" && game.phase === "choosing" && <>
-        <div className="rpsCountdown"><strong>{seconds}</strong><small>CHOISIS !</small></div>
-        {me ? <div className="rpsChoices">
-          {(["rock","paper","scissors"] as Choice[]).map((choice) => <button key={choice} className={game.myChoice === choice ? "chosen" : ""} disabled={busy} onClick={() => void choose(choice)}><span>{ICONS[choice]}</span><strong>{LABELS[choice]}</strong></button>)}
+    <div className="rpsArena rpsArenaV2">
+      <div className="rpsArenaGlow one"/><div className="rpsArenaGlow two"/>
+
+      {game.status === "playing" && game.phase === "choosing" && <div className="rpsChooseStage">
+        <div className="rpsChooseHead">
+          <div className={`rpsTimerOrb ${seconds <= 1 ? "urgent" : ""}`}><strong>{seconds}</strong><span>s</span></div>
+          <div><small>À TOI DE JOUER</small><h2>{game.myChoice ? "Choix enregistré" : "Choisis ton coup"}</h2><p>{game.myChoice ? "Ton adversaire ne peut pas le voir." : "Tu as 3 secondes. Ton choix reste secret jusqu'à la révélation."}</p></div>
+        </div>
+
+        {me ? <div className="rpsChoices rpsChoicesV2">
+          {(["rock","paper","scissors"] as Choice[]).map((choice) => {
+            const selected = game.myChoice === choice;
+            return <button key={choice} className={selected ? "chosen" : ""} disabled={busy || Boolean(game.myChoice)} onClick={() => void choose(choice)}>
+              <span className="rpsChoiceIcon">{ICONS[choice]}</span>
+              <strong>{LABELS[choice]}</strong>
+              <small>{SUBTITLES[choice]}</small>
+              {selected && <b>✓</b>}
+            </button>;
+          })}
         </div> : <div className="rpsSpectator">Tu regardes le duel.</div>}
-        {game.myChoice && <div className="rpsLocked">✓ {LABELS[game.myChoice]} sélectionné</div>}
-      </>}
 
-      {game.status === "playing" && game.phase === "chant" && <div className="rpsChant">{chant}</div>}
-
-      {(game.phase === "reveal" || game.status === "gameover") && result && <div className="rpsReveal">
-        <div><small>{left?.username}</small><span>{ICONS[result.leftChoice]}</span><strong>{LABELS[result.leftChoice]}</strong></div>
-        <b>VS</b>
-        <div><small>{right?.username}</small><span>{ICONS[result.rightChoice]}</span><strong>{LABELS[result.rightChoice]}</strong></div>
-        <p>{result.winnerSide === null ? "ÉGALITÉ !" : `${result.winnerSide === "left" ? left?.username : right?.username} gagne la manche !`}</p>
+        {game.myChoice && <div className="rpsLocked"><span>{ICONS[game.myChoice]}</span><div><small>TON CHOIX</small><strong>{LABELS[game.myChoice]}</strong></div></div>}
       </div>}
 
-      {game.status === "gameover" && <div className="rpsGameOver">
-        <span>🏆</span>
+      {game.status === "playing" && game.phase === "chant" && <div className="rpsChantStage"><small>PRÊTS ?</small><div className="rpsChant" key={chant}>{chant}</div><div className="rpsChantDots"><i/><i/><i/></div></div>}
+
+      {(game.phase === "reveal" || game.status === "gameover") && result && <div className="rpsReveal rpsRevealV2">
+        <div className={`rpsRevealSide ${result.winnerSide === "left" ? "roundWinner" : ""}`}><small>{left?.username}</small><span>{ICONS[result.leftChoice]}</span><strong>{LABELS[result.leftChoice]}</strong></div>
+        <div className="rpsVersus"><span>VS</span></div>
+        <div className={`rpsRevealSide ${result.winnerSide === "right" ? "roundWinner" : ""}`}><small>{right?.username}</small><span>{ICONS[result.rightChoice]}</span><strong>{LABELS[result.rightChoice]}</strong></div>
+        <p>{result.winnerSide === null ? "ÉGALITÉ !" : `${result.winnerSide === "left" ? left?.username : right?.username} remporte la manche`}</p>
+      </div>}
+
+      {game.status === "gameover" && <div className="rpsGameOver rpsGameOverV2">
+        <span className="rpsTrophy">🏆</span>
+        <small>DUEL TERMINÉ</small>
         <h2>{winnerName ? `${winnerName} gagne !` : "Match nul !"}</h2>
-        <p>{game.leftScore} — {game.rightScore}</p>
+        <div className="rpsFinalScore"><b>{game.leftScore}</b><span>—</span><b>{game.rightScore}</b></div>
         {isHost && <button className="primaryButton" disabled={busy} onClick={() => void stop()}>Retour aux jeux</button>}
       </div>}
     </div>
-    {error && <div className="errorBox">{error}</div>}
+    {error && <div className="errorBox rpsGameError">{error}</div>}
   </section>;
 }
