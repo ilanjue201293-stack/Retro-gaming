@@ -75,7 +75,6 @@ export default function HockeyGame({room,user,onActiveChange}:{room:Room;user:Us
     onActiveChange?.(Boolean(active));
     return()=>{
       document.body.classList.remove("hockey-match-active");
-      onActiveChange?.(false);
     };
   },[game?.status,onActiveChange]);
 
@@ -130,7 +129,7 @@ export default function HockeyGame({room,user,onActiveChange}:{room:Room;user:Us
     finally{setBusy(false)}
   };
 
-  if(!game)return <section className="hockeyLobby"><div className="spinner"/><p>Chargement du hockey…</p></section>;
+  if(!game)return <section className="hockeyLobby"><div className="spinner"/><p>Chargement du hockey…</p>{error&&<div className="errorBox">{error}</div>}</section>;
 
   if(game.status==="lobby")return <section className="hockeyLobby">
     <div className="hockeyHero"><div className="hockeyDisc">🏒</div><div><span className="kicker">HOCKEY ARCADE</span><h2>Hockey sur glace</h2><p>Choisis le mode puis lance la partie. Les deux joueurs utilisent exactement le même moteur physique.</p></div></div>
