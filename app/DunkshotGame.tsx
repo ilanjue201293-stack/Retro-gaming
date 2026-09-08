@@ -198,7 +198,8 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
       const currentHoop = hoopPosition(shotStreak, now);
       setBall({ x: point.x, y: point.y, rotation: elapsed * 620 * (activeShot.aim >= 0 ? 1 : -1), visible: true });
 
-      if (!made && lastY < currentHoop.y && point.y >= currentHoop.y && point.velocityY > 0 && Math.abs(point.x - currentHoop.x) <= 0.071) made = true;
+      const rimY = currentHoop.y + 0.065;
+      if (!made && lastY < rimY && point.y >= rimY && point.velocityY > 0 && Math.abs(point.x - currentHoop.x) <= 0.071) made = true;
       lastY = point.y;
 
       if (elapsed >= 2.15 || (elapsed > 0.55 && point.y > 1.14) || Math.abs(point.x) > 1.28) {
@@ -355,8 +356,9 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
         <div className="dunkHudCenter"><small>SÉRIE</small><strong>×{soloRun?.streak ?? 0}</strong></div>
         <div className="dunkLives"><small>VIES</small><strong>{hearts(soloRun?.lives ?? 0)}</strong></div>
       </> : <>
-        {game.players.map((player, index) => <div key={player.userId} className={`dunkPlayerHud ${game.status === "playing" && game.turnIndex === index ? "turn" : ""}`}><small>{index === 0 ? "JOUEUR 1" : "JOUEUR 2"}</small><strong>{player.username}</strong><span>{hearts(game.lives[player.userId] ?? game.livesTotal)}</span></div>)}
+        {game.players[0] && <div className={`dunkPlayerHud ${game.status === "playing" && game.turnIndex === 0 ? "turn" : ""}`}><small>JOUEUR 1</small><strong>{game.players[0].username}</strong><span>{hearts(game.lives[game.players[0].userId] ?? game.livesTotal)}</span></div>}
         <div className="dunkHudCenter"><small>SÉRIE</small><strong>×{game.streak}</strong></div>
+        {game.players[1] && <div className={`dunkPlayerHud ${game.status === "playing" && game.turnIndex === 1 ? "turn" : ""}`}><small>JOUEUR 2</small><strong>{game.players[1].username}</strong><span>{hearts(game.lives[game.players[1].userId] ?? game.livesTotal)}</span></div>}
       </>}
     </div>
 
