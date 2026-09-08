@@ -3,6 +3,7 @@ import { requireUser } from "@/lib/auth";
 import { cleanup, db, ensureSchema } from "@/lib/db";
 import { cleanRoomCode, makeId, makeRoomCode } from "@/lib/utils";
 import { requireRoomMember } from "@/lib/room";
+import { hockeyConfigure, hockeyStart, hockeyState, hockeyStop, hockeySync, type HockeyMode } from "@/lib/hockey-room";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,10 +25,13 @@ function pair(a:string,b:string):[string,string]{return a<b?[a,b]:[b,a]}
 
 export async function POST(req:NextRequest){
   try{
-    await ensureSchema(); await cleanup();
-    const user=await requireUser(req);
+    await ensureSchema();
     const data=await payload(req);
     const action=String(data.action??"state");
+    const hockeyAction=action.startsWith("hockey");
+    if(!hockeyAction) await cleanup();
+    const user=await requireUser(req,!hockeyAction);
+
     if(action==="create"){
       let code="";
       for(let i=0;i<20;i++){
@@ -55,8 +59,16 @@ export async function POST(req:NextRequest){
       await db().query(`delete from retro_room_invites where id=$1`,[inviteId]);
       return NextResponse.json({ok:true,room:await roomState(row.room_code,user.id)});
     }
+
     const code=cleanRoomCode(data.code);
     await requireRoomMember(code,user);
+
+    if(action==="hockeyState") return NextResponse.json({ok:true,game:await hockeyState(code)});
+    if(action==="hockeyConfigure") return NextResponse.json({ok:true,game:await hockeyConfigure(code,user.id,data.mode==="2v2"?"2v2":"1v1" as HockeyMode)});
+    if(action==="hockeyStart") return NextResponse.json({ok:true,game:await hockeyStart(code,user.id)});
+    if(action==="hockeyStop") return NextResponse.json({ok:true,game:await hockeyStop(code,user.id)});
+    if(action==="hockeySync") return NextResponse.json({ok:true,game:await hockeySync(code,user.id,{x:data.x,y:data.y,vx:data.vx,vy:data.vy})});
+
     if(action==="state")return NextResponse.json({ok:true,room:await roomState(code,user.id)});
     if(action==="leave"){
       const current=await db().query<{host_user_id:string}>(`select host_user_id from retro_rooms where code=$1 limit 1`,[code]);
