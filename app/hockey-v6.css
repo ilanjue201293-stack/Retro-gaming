@@ -1,0 +1,7 @@
+.hockeyMallet{width:9.8%}
+.goal{top:33%;height:34%}
+.goalCrease{top:31%;height:38%;width:12%}
+.hockeyCountdown{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:18;display:grid;place-items:center;align-content:center;width:96px;height:96px;border-radius:50%;background:rgba(5,13,21,.76);border:2px solid rgba(255,255,255,.72);box-shadow:0 10px 34px rgba(0,0,0,.28);pointer-events:none;color:#fff}
+.hockeyCountdown b{font-size:42px;line-height:.9;font-variant-numeric:tabular-nums}.hockeyCountdown span{margin-top:7px;font-size:8px;font-weight:950;letter-spacing:.16em;color:#dceaf2}
+@media(max-width:850px){.hockeyMallet{width:12%}}
+@media(max-width:600px){.hockeyMallet{width:13.8%}.hockeyCountdown{width:80px;height:80px}.hockeyCountdown b{font-size:34px}}
