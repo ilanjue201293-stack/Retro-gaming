@@ -1,0 +1,48 @@
+name: Polish Dunkshot
+permissions:
+  contents: write
+on:
+  push:
+    paths:
+      - '.github/workflows/polish-dunkshot.yml'
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Patch Dunkshot polish
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('app/DunkshotGame.tsx')
+          s=p.read_text()
+          old='if (!made && lastY < currentHoop.y && point.y >= currentHoop.y && point.velocityY > 0 && Math.abs(point.x - currentHoop.x) <= 0.071) made = true;'
+          new='const rimY = currentHoop.y + 0.065;\n      if (!made && lastY < rimY && point.y >= rimY && point.velocityY > 0 && Math.abs(point.x - currentHoop.x) <= 0.071) made = true;'
+          if s.count(old)!=1: raise SystemExit('scoring marker not found uniquely')
+          s=s.replace(old,new,1)
+          oldhud='''      </> : <>\n        {game.players.map((player, index) => <div key={player.userId} className={`dunkPlayerHud ${game.status === "playing" && game.turnIndex === index ? "turn" : ""}`}><small>{index === 0 ? "JOUEUR 1" : "JOUEUR 2"}</small><strong>{player.username}</strong><span>{hearts(game.lives[player.userId] ?? game.livesTotal)}</span></div>)}\n        <div className="dunkHudCenter"><small>SÉRIE</small><strong>×{game.streak}</strong></div>\n      </>}'''
+          newhud='''      </> : <>\n        {game.players[0] && <div className={`dunkPlayerHud ${game.status === "playing" && game.turnIndex === 0 ? "turn" : ""}`}><small>JOUEUR 1</small><strong>{game.players[0].username}</strong><span>{hearts(game.lives[game.players[0].userId] ?? game.livesTotal)}</span></div>}\n        <div className="dunkHudCenter"><small>SÉRIE</small><strong>×{game.streak}</strong></div>\n        {game.players[1] && <div className={`dunkPlayerHud ${game.status === "playing" && game.turnIndex === 1 ? "turn" : ""}`}><small>JOUEUR 2</small><strong>{game.players[1].username}</strong><span>{hearts(game.lives[game.players[1].userId] ?? game.livesTotal)}</span></div>}\n      </>}'''
+          if s.count(oldhud)!=1: raise SystemExit('HUD marker not found uniquely')
+          s=s.replace(oldhud,newhud,1)
+          p.write_text(s)
+          PY
+      - run: npm install
+      - run: npm run typecheck
+      - name: Commit polish
+        run: |
+          git config user.name "Retro updater"
+          git config user.email "actions@users.noreply.github.com"
+          git add app/DunkshotGame.tsx
+          git commit -m "Polish Dunkshot scoring and duel HUD"
+          git push origin main
+      - name: Cleanup
+        run: |
+          git pull --rebase origin main
+          git rm .github/workflows/polish-dunkshot.yml
+          git commit -m "Remove temporary Dunkshot polish workflow"
+          git push origin main
