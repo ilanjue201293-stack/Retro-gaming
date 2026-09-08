@@ -24,7 +24,7 @@ async function post(payload:Record<string,unknown>){
 function initial(player:Player,mode:Mode):Paddle{return{x:player.side==="left"?.2:.8,y:mode==="1v1"?.5:player.slot===0?.34:.66,vx:0,vy:0}}
 function clampPad(side:Side,x:number,y:number){return{x:Math.max(side==="left"?.075:.53,Math.min(side==="left"?.47:.925,x)),y:Math.max(.085,Math.min(.915,y))}}
 
-export default function HockeyGame({room,user,onActiveChange}:{room:Room;user:User;onActiveChange?:(active:boolean)=>void}){
+export default function HockeyGame({room,user}:{room:Room;user:User;onActiveChange?:(active:boolean)=>void}){
   const[game,setGame]=useState<Game|null>(null),[error,setError]=useState(""),[busy,setBusy]=useState(false),[localPad,setLocalPad]=useState<{x:number;y:number}|null>(null);
   const rinkRef=useRef<HTMLDivElement|null>(null),gameRef=useRef<Game|null>(null),inputRef=useRef<LocalInput|null>(null),lastInputRef=useRef({x:.5,y:.5,at:Date.now()});
   useEffect(()=>{gameRef.current=game},[game]);
@@ -46,7 +46,11 @@ export default function HockeyGame({room,user,onActiveChange}:{room:Room;user:Us
     void sync();const id=window.setInterval(sync,170);return()=>{alive=false;window.clearInterval(id)};
   },[room.code,user.id,apply]);
 
-  useEffect(()=>{const active=game?.status==="playing"||game?.status==="gameover";document.body.classList.toggle("hockey-match-active",Boolean(active));onActiveChange?.(Boolean(active));return()=>document.body.classList.remove("hockey-match-active")},[game?.status,onActiveChange]);
+  useEffect(()=>{
+    const active=game?.status==="playing"||game?.status==="gameover";
+    document.body.classList.toggle("hockey-match-active",Boolean(active));
+    return()=>document.body.classList.remove("hockey-match-active");
+  },[game?.status]);
   useEffect(()=>{if(!me||game?.status!=="playing"){inputRef.current=null;setLocalPad(null);return}const p=game.frame?.paddles?.[user.id]??initial(me,game.mode);inputRef.current={x:p.x,y:p.y,vx:0,vy:0};lastInputRef.current={x:p.x,y:p.y,at:Date.now()};setLocalPad({x:p.x,y:p.y})},[game?.status,me?.userId,user.id]);
 
   const sendPosition=useCallback((x:number,y:number)=>{const current=gameRef.current,player=current?.players.find(p=>p.userId===user.id);if(!current||!player||current.status!=="playing")return;const point=clampPad(player.side,x,y),now=Date.now(),dt=Math.max(.018,(now-lastInputRef.current.at)/1000);let vx=(point.x-lastInputRef.current.x)/dt,vy=(point.y-lastInputRef.current.y)/dt;const speed=Math.hypot(vx,vy);if(speed>MAX_MALLET){vx*=MAX_MALLET/speed;vy*=MAX_MALLET/speed}lastInputRef.current={x:point.x,y:point.y,at:now};inputRef.current={x:point.x,y:point.y,vx,vy};setLocalPad(point)},[user.id]);
