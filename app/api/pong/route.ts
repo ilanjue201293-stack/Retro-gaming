@@ -15,6 +15,9 @@ type PongRow = {
   left_score: number;
   right_score: number;
   winner_side: Side | null;
+  target_score: number;
+  time_limit_sec: number;
+  started_at: string | null;
 };
 
 let schemaPromise: Promise<void> | null = null;
@@ -28,8 +31,14 @@ async function ensurePongSchema() {
         left_score integer not null default 0,
         right_score integer not null default 0,
         winner_side text,
+        target_score integer not null default 7,
+        time_limit_sec integer not null default 0,
+        started_at timestamptz,
         updated_at timestamptz not null default now()
       );
+      alter table retro_pong_games add column if not exists target_score integer not null default 7;
+      alter table retro_pong_games add column if not exists time_limit_sec integer not null default 0;
+      alter table retro_pong_games add column if not exists started_at timestamptz;
       create table if not exists retro_pong_signals (
         id bigserial primary key,
         room_code text not null references retro_rooms(code) on delete cascade,
@@ -85,28 +94,39 @@ async function hostId(code: string) {
 }
 
 function gameOutput(row: PongRow) {
+  const startedAt = row.started_at ? new Date(row.started_at).getTime() : null;
+  const timeLimitSec = Math.max(0, Number(row.time_limit_sec || 0));
   return {
     status: row.status,
     players: Array.isArray(row.players) ? row.players as Player[] : [],
     leftScore: Number(row.left_score || 0),
     rightScore: Number(row.right_score || 0),
     winnerSide: row.winner_side,
-    targetScore: 7,
+    targetScore: Math.max(1, Number(row.target_score || 7)),
+    timeLimitSec,
+    startedAt,
+    endsAt: startedAt && timeLimitSec > 0 ? startedAt + timeLimitSec * 1000 : null,
   };
+}
+
+async function getRow(code: string) {
+  await ensureGame(code);
+  const result = await db().query<PongRow>(
+    `select room_code,status,players,left_score,right_score,winner_side,target_score,time_limit_sec,started_at::text
+     from retro_pong_games where room_code=$1 limit 1`,
+    [code]
+  );
+  if (!result.rows[0]) throw new Error("Pong indisponible.");
+  return result.rows[0];
 }
 
 async function state(code: string) {
   await ensureGame(code);
   const hockey = await db().query<{ status: string }>(`select status from retro_hockey_games where room_code=$1 limit 1`, [code]);
   if (hockey.rows[0] && hockey.rows[0].status !== "lobby") {
-    await db().query(`update retro_pong_games set status='lobby',players='[]'::jsonb,left_score=0,right_score=0,winner_side=null,updated_at=now() where room_code=$1 and status<>'lobby'`, [code]);
+    await db().query(`update retro_pong_games set status='lobby',players='[]'::jsonb,left_score=0,right_score=0,winner_side=null,started_at=null,updated_at=now() where room_code=$1 and status<>'lobby'`, [code]);
   }
-  const result = await db().query<PongRow>(
-    `select room_code,status,players,left_score,right_score,winner_side from retro_pong_games where room_code=$1 limit 1`,
-    [code]
-  );
-  if (!result.rows[0]) throw new Error("Pong indisponible.");
-  return gameOutput(result.rows[0]);
+  return gameOutput(await getRow(code));
 }
 
 export async function POST(req: NextRequest) {
@@ -119,6 +139,20 @@ export async function POST(req: NextRequest) {
 
     if (action === "state") {
       return NextResponse.json({ ok: true, game: await state(code) });
+    }
+
+    if (action === "configure") {
+      if (await hostId(code) !== user.id) throw new Error("Seul l'hôte peut régler Pong.");
+      await ensureGame(code);
+      const targetScore = Math.max(1, Math.min(30, Math.round(Number(data.targetScore) || 7)));
+      const allowedTimes = new Set([0, 60, 120, 180, 300, 600]);
+      const requestedTime = Math.max(0, Math.round(Number(data.timeLimitSec) || 0));
+      const timeLimitSec = allowedTimes.has(requestedTime) ? requestedTime : 0;
+      await db().query(
+        `update retro_pong_games set target_score=$1,time_limit_sec=$2,status='lobby',players='[]'::jsonb,left_score=0,right_score=0,winner_side=null,started_at=null,updated_at=now() where room_code=$3`,
+        [targetScore, timeLimitSec, code]
+      );
+      return NextResponse.json({ ok: true, game: gameOutput(await getRow(code)) });
     }
 
     if (action === "start") {
@@ -137,8 +171,9 @@ export async function POST(req: NextRequest) {
         { userId: members.rows[1].id, username: members.rows[1].username, side: "right" },
       ];
       await db().query(`update retro_hockey_games set status='lobby',players='[]'::jsonb,left_score=0,right_score=0,winner_side=null,updated_at=now() where room_code=$1`, [code]);
+      await db().query(`update retro_rps_games set status='lobby',players='[]'::jsonb,round_index=0,left_score=0,right_score=0,choices='{}'::jsonb,phase='choosing',phase_started_at=null,phase_ends_at=null,last_result=null,winner_side=null,updated_at=now() where room_code=$1`, [code]).catch(() => undefined);
       await db().query(
-        `update retro_pong_games set status='playing',players=$1::jsonb,left_score=0,right_score=0,winner_side=null,updated_at=now() where room_code=$2`,
+        `update retro_pong_games set status='playing',players=$1::jsonb,left_score=0,right_score=0,winner_side=null,started_at=now(),updated_at=now() where room_code=$2`,
         [JSON.stringify(players), code]
       );
       await db().query(`delete from retro_pong_signals where room_code=$1`, [code]);
@@ -148,16 +183,21 @@ export async function POST(req: NextRequest) {
     if (action === "stop") {
       if (await hostId(code) !== user.id) throw new Error("Seul l'hôte peut arrêter Pong.");
       await ensureGame(code);
-      await db().query(`update retro_pong_games set status='lobby',players='[]'::jsonb,left_score=0,right_score=0,winner_side=null,updated_at=now() where room_code=$1`, [code]);
+      await db().query(`update retro_pong_games set status='lobby',players='[]'::jsonb,left_score=0,right_score=0,winner_side=null,started_at=null,updated_at=now() where room_code=$1`, [code]);
       await db().query(`delete from retro_pong_signals where room_code=$1`, [code]);
       return NextResponse.json({ ok: true, game: await state(code) });
     }
 
     if (action === "checkpoint") {
       if (await hostId(code) !== user.id) throw new Error("Seul l'hôte peut synchroniser Pong.");
+      const row = await getRow(code);
       const leftScore = Math.max(0, Math.min(99, Number(data.leftScore) || 0));
       const rightScore = Math.max(0, Math.min(99, Number(data.rightScore) || 0));
-      const winnerSide: Side | null = leftScore >= 7 ? "left" : rightScore >= 7 ? "right" : null;
+      let winnerSide: Side | null = data.winnerSide === "left" || data.winnerSide === "right" ? data.winnerSide : null;
+      if (!winnerSide) {
+        if (leftScore >= row.target_score) winnerSide = "left";
+        else if (rightScore >= row.target_score) winnerSide = "right";
+      }
       await db().query(
         `update retro_pong_games set left_score=$1,right_score=$2,winner_side=$3,status=case when $3::text is null then 'playing' else 'gameover' end,updated_at=now() where room_code=$4`,
         [leftScore, rightScore, winnerSide, code]
