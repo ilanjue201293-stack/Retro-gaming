@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { attachSessionCookie, clearSessionCookie, createSession, deleteCurrentSession, getAuthedUser, hashPassword, verifyPassword } from "@/lib/auth";
+import { attachSessionCookie, clearSessionCookie, createSession, deleteCurrentSession, getAuthedUser, hashPassword, requireUser, verifyPassword } from "@/lib/auth";
 import { db, ensureSchema } from "@/lib/db";
 import { cleanUsername, makeId, usernameKey, validateUsername } from "@/lib/utils";
 
@@ -26,18 +26,21 @@ export async function POST(req: NextRequest) {
         throw e;
       }
       const token = await createSession(id);
-      const response = NextResponse.json({ ok: true, user: { id, username } });
+      const response = NextResponse.json({ ok: true, user: { id, username, avatarData: null } });
       attachSessionCookie(response, token);
       return response;
     }
     if (action === "login") {
       const username = cleanUsername(data.username);
       const password = String(data.password ?? "");
-      const found = await db().query<{ id: string; username: string; password_hash: string }>(`select id, username, password_hash from retro_users where username_key = $1 limit 1`, [usernameKey(username)]);
+      const found = await db().query<{ id: string; username: string; password_hash: string; avatar_data: string | null }>(
+        `select id, username, password_hash, avatar_data from retro_users where username_key = $1 limit 1`,
+        [usernameKey(username)]
+      );
       const row = found.rows[0];
       if (!row || !(await verifyPassword(password, row.password_hash))) throw new Error("Pseudo ou mot de passe incorrect.");
       const token = await createSession(row.id);
-      const response = NextResponse.json({ ok: true, user: { id: row.id, username: row.username } });
+      const response = NextResponse.json({ ok: true, user: { id: row.id, username: row.username, avatarData: row.avatar_data } });
       attachSessionCookie(response, token);
       return response;
     }
@@ -46,6 +49,16 @@ export async function POST(req: NextRequest) {
       const response = NextResponse.json({ ok: true });
       clearSessionCookie(response);
       return response;
+    }
+    if (action === "avatar") {
+      const user = await requireUser(req, false);
+      const raw = data.avatarData === null ? null : String(data.avatarData ?? "");
+      if (raw !== null) {
+        if (!/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(raw)) throw new Error("Format d'image invalide.");
+        if (raw.length > 220_000) throw new Error("Image trop lourde après compression.");
+      }
+      await db().query(`update retro_users set avatar_data=$1 where id=$2`, [raw, user.id]);
+      return NextResponse.json({ ok: true, user: { id: user.id, username: user.username, avatarData: raw } });
     }
     if (action === "me") return NextResponse.json({ ok: true, user: await getAuthedUser(req) });
     throw new Error("Action inconnue.");
