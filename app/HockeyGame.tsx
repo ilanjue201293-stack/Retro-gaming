@@ -29,9 +29,15 @@ type FrameState = {
   version?: number;
 };
 
-const MAX_MALLET_SPEED = 1.25;
-const POLL_MS = 65;
-const INPUT_MS = 42;
+type Props = {
+  room: Room;
+  user: User;
+  onActiveChange?: (active: boolean) => void;
+};
+
+const MAX_MALLET_SPEED = 1.55;
+const PLAY_TICK_MS = 72;
+const LOBBY_TICK_MS = 260;
 
 async function post(path: string, payload: Record<string, unknown>) {
   const res = await fetch(path, {
@@ -45,10 +51,21 @@ async function post(path: string, payload: Record<string, unknown>) {
   return data;
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function capVector(x: number, y: number, max: number) {
+  const speed = Math.hypot(x, y);
+  if (speed <= max || speed <= 0.000001) return { x, y };
+  const ratio = max / speed;
+  return { x: x * ratio, y: y * ratio };
+}
+
 function initialPaddle(player: Player, mode: Mode): Paddle {
   return {
     x: player.side === "left" ? 0.2 : 0.8,
-    y: mode === "1v1" ? 0.5 : player.slot === 0 ? 0.34 : 0.66,
+    y: mode === "1v1" ? 0.5 : player.slot === 0 ? 0.32 : 0.68,
     vx: 0,
     vy: 0,
   };
@@ -56,15 +73,15 @@ function initialPaddle(player: Player, mode: Mode): Paddle {
 
 function clampPaddle(side: Side, x: number, y: number) {
   return {
-    x: Math.max(side === "left" ? 0.075 : 0.53, Math.min(side === "left" ? 0.47 : 0.925, x)),
-    y: Math.max(0.085, Math.min(0.915, y)),
+    x: clamp(x, side === "left" ? 0.075 : 0.51, side === "left" ? 0.49 : 0.925),
+    y: clamp(y, 0.085, 0.915),
   };
 }
 
 function baseFrame(game: Game): FrameState {
   return {
     puck: { x: 0.5, y: 0.5, vx: 0, vy: 0 },
-    paddles: Object.fromEntries(game.players.map((p) => [p.userId, initialPaddle(p, game.mode)])),
+    paddles: Object.fromEntries(game.players.map((player) => [player.userId, initialPaddle(player, game.mode)])),
     leftScore: game.leftScore,
     rightScore: game.rightScore,
     winnerSide: game.winnerSide,
@@ -76,52 +93,45 @@ function lerp(a: number, b: number, amount: number) {
   return a + (b - a) * amount;
 }
 
-export default function HockeyGame({ room, user }: { room: Room; user: User }) {
+export default function HockeyGame({ room, user, onActiveChange }: Props) {
   const [game, setGame] = useState<Game | null>(null);
   const [frame, setFrame] = useState<FrameState | null>(null);
+  const [localPaddle, setLocalPaddle] = useState<{ x: number; y: number } | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [network, setNetwork] = useState("Synchronisation serveur…");
-  const [localPaddle, setLocalPaddle] = useState<{ x: number; y: number } | null>(null);
 
   const gameRef = useRef<Game | null>(null);
+  const rinkRef = useRef<HTMLDivElement | null>(null);
+  const inFlightRef = useRef(false);
+  const draggingRef = useRef(false);
   const targetFrameRef = useRef<FrameState | null>(null);
   const shownFrameRef = useRef<FrameState | null>(null);
-  const rinkRef = useRef<HTMLDivElement | null>(null);
-  const pollingRef = useRef(false);
-  const localInputRef = useRef({ x: 0.5, y: 0.5, at: Date.now() });
-  const lastInputSentRef = useRef(0);
-  const trailingInputRef = useRef<number | null>(null);
-  const pendingInputRef = useRef<{ x: number; y: number; vx: number; vy: number } | null>(null);
+  const latestInputRef = useRef({ x: 0.5, y: 0.5, vx: 0, vy: 0, movedAt: 0 });
+  const previousPointerRef = useRef({ x: 0.5, y: 0.5, at: Date.now() });
 
-  useEffect(() => { gameRef.current = game; }, [game]);
+  useEffect(() => {
+    gameRef.current = game;
+    if (game) onActiveChange?.(game.status !== "lobby");
+  }, [game, onActiveChange]);
 
-  const me = useMemo(() => game?.players.find((p) => p.userId === user.id) ?? null, [game, user.id]);
-  const leftPlayers = useMemo(() => game?.players.filter((p) => p.side === "left") ?? [], [game]);
-  const rightPlayers = useMemo(() => game?.players.filter((p) => p.side === "right") ?? [], [game]);
+  const me = useMemo(() => game?.players.find((player) => player.userId === user.id) ?? null, [game, user.id]);
+  const leftPlayers = useMemo(() => game?.players.filter((player) => player.side === "left") ?? [], [game]);
+  const rightPlayers = useMemo(() => game?.players.filter((player) => player.side === "right") ?? [], [game]);
   const isHost = room.hostId === user.id;
-  const onlineCount = room.members.filter((m) => m.online).length;
+  const onlineCount = room.members.filter((member) => member.online).length;
   const needed = game?.mode === "2v2" ? 4 : 2;
 
-  const applyServerFrame = useCallback((next: FrameState | null, nextGame: Game) => {
-    if (!next) {
-      const base = baseFrame(nextGame);
-      targetFrameRef.current = base;
-      if (!shownFrameRef.current) {
-        shownFrameRef.current = base;
-        setFrame(base);
-      }
-      return;
-    }
+  const applyFrame = useCallback((next: FrameState | null, nextGame: Game) => {
+    const incoming = next ?? baseFrame(nextGame);
+    targetFrameRef.current = incoming;
 
     const current = shownFrameRef.current;
-    const scoreChanged = current && (current.leftScore !== next.leftScore || current.rightScore !== next.rightScore);
-    const hugeJump = current && Math.hypot(current.puck.x - next.puck.x, current.puck.y - next.puck.y) > 0.28;
-    targetFrameRef.current = next;
+    const scoreChanged = current && (current.leftScore !== incoming.leftScore || current.rightScore !== incoming.rightScore);
+    const resetJump = current && Math.hypot(current.puck.x - incoming.puck.x, current.puck.y - incoming.puck.y) > 0.34;
 
-    if (!current || scoreChanged || hugeJump) {
-      shownFrameRef.current = next;
-      setFrame(next);
+    if (!current || scoreChanged || resetJump) {
+      shownFrameRef.current = incoming;
+      setFrame(incoming);
     }
   }, []);
 
@@ -131,26 +141,27 @@ export default function HockeyGame({ room, user }: { room: Room; user: User }) {
       const target = targetFrameRef.current;
       const current = shownFrameRef.current;
       if (target && current) {
-        const nextPaddles: Record<string, Paddle> = {};
+        const paddles: Record<string, Paddle> = {};
         const ids = new Set([...Object.keys(current.paddles), ...Object.keys(target.paddles)]);
         for (const id of ids) {
-          const a = current.paddles[id] ?? target.paddles[id];
-          const b = target.paddles[id] ?? a;
-          nextPaddles[id] = {
-            x: lerp(a.x, b.x, 0.34),
-            y: lerp(a.y, b.y, 0.34),
-            vx: b.vx,
-            vy: b.vy,
+          const from = current.paddles[id] ?? target.paddles[id];
+          const to = target.paddles[id] ?? from;
+          paddles[id] = {
+            x: lerp(from.x, to.x, 0.42),
+            y: lerp(from.y, to.y, 0.42),
+            vx: to.vx,
+            vy: to.vy,
           };
         }
+
         const next: FrameState = {
           puck: {
-            x: lerp(current.puck.x, target.puck.x, 0.3),
-            y: lerp(current.puck.y, target.puck.y, 0.3),
+            x: lerp(current.puck.x, target.puck.x, 0.38),
+            y: lerp(current.puck.y, target.puck.y, 0.38),
             vx: target.puck.vx,
             vy: target.puck.vy,
           },
-          paddles: nextPaddles,
+          paddles,
           leftScore: target.leftScore,
           rightScore: target.rightScore,
           winnerSide: target.winnerSide,
@@ -166,30 +177,42 @@ export default function HockeyGame({ room, user }: { room: Room; user: User }) {
     return () => cancelAnimationFrame(raf);
   }, []);
 
-  const poll = useCallback(async () => {
-    if (pollingRef.current) return;
-    pollingRef.current = true;
+  const tick = useCallback(async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     try {
-      const data = await post("/api/hockey", { action: "poll", code: room.code });
+      const current = gameRef.current;
+      const player = current?.players.find((entry) => entry.userId === user.id);
+      const request: Record<string, unknown> = { action: "tick", code: room.code };
+
+      if (current?.status === "playing" && player) {
+        const latest = latestInputRef.current;
+        const staleVelocity = Date.now() - latest.movedAt > 110;
+        request.x = latest.x;
+        request.y = latest.y;
+        request.vx = staleVelocity ? 0 : latest.vx;
+        request.vy = staleVelocity ? 0 : latest.vy;
+      }
+
+      const data = await post("/api/hockey", request);
       const nextGame = data.game as Game;
       gameRef.current = nextGame;
       setGame(nextGame);
-      applyServerFrame((data.frame ?? null) as FrameState | null, nextGame);
-      setNetwork("Serveur synchronisé");
+      applyFrame((data.frame ?? null) as FrameState | null, nextGame);
       setError("");
-    } catch (e) {
-      setNetwork("Reconnexion serveur…");
-      setError(e instanceof Error ? e.message : "Hockey indisponible.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Synchronisation impossible.");
     } finally {
-      pollingRef.current = false;
+      inFlightRef.current = false;
     }
-  }, [applyServerFrame, room.code]);
+  }, [applyFrame, room.code, user.id]);
 
   useEffect(() => {
-    void poll();
-    const id = window.setInterval(() => void poll(), game?.status === "lobby" ? 260 : POLL_MS);
+    void tick();
+    const delay = game?.status === "playing" || game?.status === "gameover" ? PLAY_TICK_MS : LOBBY_TICK_MS;
+    const id = window.setInterval(() => void tick(), delay);
     return () => window.clearInterval(id);
-  }, [poll, game?.status]);
+  }, [tick, game?.status]);
 
   useEffect(() => {
     if (!game || !me || game.status !== "playing") {
@@ -197,103 +220,85 @@ export default function HockeyGame({ room, user }: { room: Room; user: User }) {
       return;
     }
     const start = frame?.paddles[me.userId] ?? initialPaddle(me, game.mode);
-    localInputRef.current = { x: start.x, y: start.y, at: Date.now() };
+    latestInputRef.current = { x: start.x, y: start.y, vx: 0, vy: 0, movedAt: Date.now() };
+    previousPointerRef.current = { x: start.x, y: start.y, at: Date.now() };
     setLocalPaddle({ x: start.x, y: start.y });
   }, [game?.status, game?.mode, me?.userId]);
 
-  const sendInputNow = useCallback((input: { x: number; y: number; vx: number; vy: number }) => {
-    lastInputSentRef.current = Date.now();
-    pendingInputRef.current = null;
-    void post("/api/hockey", { action: "input", code: room.code, ...input }).catch(() => {
-      setNetwork("Reconnexion serveur…");
-    });
-  }, [room.code]);
-
-  const queueInput = useCallback((input: { x: number; y: number; vx: number; vy: number }) => {
-    pendingInputRef.current = input;
-    const elapsed = Date.now() - lastInputSentRef.current;
-    if (elapsed >= INPUT_MS) {
-      sendInputNow(input);
-      return;
-    }
-    if (trailingInputRef.current !== null) return;
-    trailingInputRef.current = window.setTimeout(() => {
-      trailingInputRef.current = null;
-      const pending = pendingInputRef.current;
-      if (pending) sendInputNow(pending);
-    }, INPUT_MS - elapsed);
-  }, [sendInputNow]);
-
-  useEffect(() => () => {
-    if (trailingInputRef.current !== null) window.clearTimeout(trailingInputRef.current);
-  }, []);
-
-  const sendInput = useCallback((x: number, y: number) => {
+  const moveLocal = useCallback((x: number, y: number) => {
     const current = gameRef.current;
-    const player = current?.players.find((p) => p.userId === user.id);
-    if (!current || !player || current.status !== "playing") return;
+    const player = current?.players.find((entry) => entry.userId === user.id);
+    if (!current || current.status !== "playing" || !player) return;
 
     const point = clampPaddle(player.side, x, y);
     const now = Date.now();
-    const last = localInputRef.current;
-    const seconds = Math.max(0.014, (now - last.at) / 1000);
-    const vx = Math.max(-MAX_MALLET_SPEED, Math.min(MAX_MALLET_SPEED, (point.x - last.x) / seconds));
-    const vy = Math.max(-MAX_MALLET_SPEED, Math.min(MAX_MALLET_SPEED, (point.y - last.y) / seconds));
-    localInputRef.current = { x: point.x, y: point.y, at: now };
+    const previous = previousPointerRef.current;
+    const seconds = Math.max(0.012, (now - previous.at) / 1000);
+    const velocity = capVector((point.x - previous.x) / seconds, (point.y - previous.y) / seconds, MAX_MALLET_SPEED);
+
+    previousPointerRef.current = { x: point.x, y: point.y, at: now };
+    latestInputRef.current = { x: point.x, y: point.y, vx: velocity.x, vy: velocity.y, movedAt: now };
     setLocalPaddle(point);
-    queueInput({ x: point.x, y: point.y, vx, vy });
-  }, [queueInput, user.id]);
+  }, [user.id]);
 
   const pointerToRink = (event: PointerEvent<HTMLDivElement>) => {
     const rect = rinkRef.current?.getBoundingClientRect();
     if (!rect) return;
-    if (event.type === "pointerdown") event.currentTarget.setPointerCapture(event.pointerId);
-    sendInput((event.clientX - rect.left) / rect.width, (event.clientY - rect.top) / rect.height);
+    moveLocal((event.clientX - rect.left) / rect.width, (event.clientY - rect.top) / rect.height);
   };
 
   const configure = async (mode: Mode) => {
     try {
-      setBusy(true); setError("");
+      setBusy(true);
+      setError("");
       const data = await post("/api/hockey", { action: "configure", code: room.code, mode });
-      gameRef.current = data.game;
-      setGame(data.game);
+      const next = data.game as Game;
+      gameRef.current = next;
+      setGame(next);
       targetFrameRef.current = null;
       shownFrameRef.current = null;
       setFrame(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Erreur.");
-    } finally { setBusy(false); }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur.");
+    } finally {
+      setBusy(false);
+    }
   };
 
   const start = async () => {
     try {
-      setBusy(true); setError("");
+      setBusy(true);
+      setError("");
       const data = await post("/api/hockey", { action: "start", code: room.code });
-      const next = data.game as Game;
-      gameRef.current = next;
-      setGame(next);
-      const base = baseFrame(next);
-      targetFrameRef.current = base;
-      shownFrameRef.current = base;
-      setFrame(base);
-      setNetwork("Lancement…");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Erreur.");
-    } finally { setBusy(false); }
+      const nextGame = data.game as Game;
+      const nextFrame = (data.frame ?? baseFrame(nextGame)) as FrameState;
+      gameRef.current = nextGame;
+      setGame(nextGame);
+      targetFrameRef.current = nextFrame;
+      shownFrameRef.current = nextFrame;
+      setFrame(nextFrame);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur.");
+    } finally {
+      setBusy(false);
+    }
   };
 
   const stop = async () => {
     try {
-      setBusy(true); setError("");
+      setBusy(true);
       const data = await post("/api/hockey", { action: "stop", code: room.code });
-      gameRef.current = data.game;
-      setGame(data.game);
+      const next = data.game as Game;
+      gameRef.current = next;
+      setGame(next);
       targetFrameRef.current = null;
       shownFrameRef.current = null;
       setFrame(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Erreur.");
-    } finally { setBusy(false); }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur.");
+    } finally {
+      setBusy(false);
+    }
   };
 
   if (!game) {
@@ -307,7 +312,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User }) {
         <div>
           <span className="kicker">HOCKEY ARCADE</span>
           <h2>Hockey sur glace</h2>
-          <p>Vue du dessus, palet physique, rebonds sur les bandes et buts. Chaque joueur contrôle réellement son maillet dans la même simulation.</p>
+          <p>Chaque joueur contrôle son propre maillet dans une seule partie synchronisée.</p>
         </div>
       </div>
 
@@ -322,8 +327,8 @@ export default function HockeyGame({ room, user }: { room: Room; user: User }) {
 
       <div className="hockeyRules">
         <div><b>7</b><span>Premier à 7 buts</span></div>
-        <div><b>↗</b><span>La vitesse de ton geste influence le tir</span></div>
-        <div><b>◉</b><span>Le palet glisse et rebondit sur les bandes</span></div>
+        <div><b>↗</b><span>Glisse ton maillet pour frapper</span></div>
+        <div><b>◉</b><span>Rebonds physiques sur les bandes</span></div>
       </div>
 
       <div className="hockeyReadyBar">
@@ -337,24 +342,32 @@ export default function HockeyGame({ room, user }: { room: Room; user: User }) {
   }
 
   const shown = frame ?? baseFrame(game);
-  const winnerNames = (shown.winnerSide === "left" ? leftPlayers : rightPlayers).map((p) => p.username).join(" & ");
-  const synced = network === "Serveur synchronisé";
+  const winnerNames = (shown.winnerSide === "left" ? leftPlayers : rightPlayers).map((player) => player.username).join(" & ");
 
-  return <section className="hockeyGameWrap">
-    <div className="hockeyGameTop">
-      <div className="teamNames leftTeam"><small>ÉQUIPE BLEUE</small><strong>{leftPlayers.map((p) => p.username).join(" · ")}</strong></div>
+  return <section className="hockeyGameWrap hockeyGameLive">
+    <div className="hockeyGameTop hockeyScoreOnly">
+      <div className="teamNames leftTeam"><strong>{leftPlayers.map((player) => player.username).join(" · ")}</strong></div>
       <div className="hockeyScore"><b>{shown.leftScore}</b><span>—</span><b>{shown.rightScore}</b></div>
-      <div className="teamNames rightTeam"><small>ÉQUIPE ROUGE</small><strong>{rightPlayers.map((p) => p.username).join(" · ")}</strong></div>
+      <div className="teamNames rightTeam"><strong>{rightPlayers.map((player) => player.username).join(" · ")}</strong></div>
     </div>
 
-    <div className="rinkFrame">
+    <div className="rinkFrame hockeyLiveRinkFrame">
       <div
         ref={rinkRef}
         className={`hockeyRink ${me ? "controllable" : "spectating"}`}
-        onPointerDown={pointerToRink}
-        onPointerMove={(event) => {
-          if (event.buttons || event.pointerType === "touch") pointerToRink(event);
+        onPointerDown={(event) => {
+          draggingRef.current = true;
+          event.currentTarget.setPointerCapture(event.pointerId);
+          pointerToRink(event);
         }}
+        onPointerMove={(event) => {
+          if (draggingRef.current || event.pointerType === "touch") pointerToRink(event);
+        }}
+        onPointerUp={(event) => {
+          draggingRef.current = false;
+          try { event.currentTarget.releasePointerCapture(event.pointerId); } catch {}
+        }}
+        onPointerCancel={() => { draggingRef.current = false; }}
       >
         <div className="rinkCenterLine"/>
         <div className="rinkCenterCircle"/>
@@ -364,8 +377,8 @@ export default function HockeyGame({ room, user }: { room: Room; user: User }) {
         <div className="goalCrease creaseRight"/>
 
         {game.players.map((player) => {
-          const base = shown.paddles[player.userId] ?? initialPaddle(player, game.mode);
-          const pad = player.userId === user.id && localPaddle ? { ...base, ...localPaddle } : base;
+          const serverPad = shown.paddles[player.userId] ?? initialPaddle(player, game.mode);
+          const pad = player.userId === user.id && localPaddle ? { ...serverPad, ...localPaddle } : serverPad;
           return <div
             key={player.userId}
             className={`hockeyMallet ${player.side} ${player.userId === user.id ? "mine" : ""}`}
@@ -376,20 +389,17 @@ export default function HockeyGame({ room, user }: { room: Room; user: User }) {
         <div className="hockeyPuck" style={{ left: `${shown.puck.x * 100}%`, top: `${shown.puck.y * 100}%` }}/>
 
         {shown.pauseUntil > Date.now() && !shown.winnerSide && <div className="faceoffLabel">MISE EN JEU</div>}
+
         {shown.winnerSide && <div className="hockeyWinnerOverlay">
           <span>🏆</span>
           <h2>{winnerNames || "Équipe"} gagne !</h2>
           <p>{shown.leftScore} — {shown.rightScore}</p>
-          {isHost && <div><button className="primaryButton" onClick={() => void start()}>Rejouer</button><button className="secondaryButton" onClick={() => void stop()}>Retour</button></div>}
+          {isHost && <div>
+            <button className="primaryButton" disabled={busy} onClick={() => void start()}>Rejouer</button>
+            <button className="secondaryButton" disabled={busy} onClick={() => void stop()}>Retour à la room</button>
+          </div>}
         </div>}
       </div>
     </div>
-
-    <div className="hockeyFooter">
-      <span className={`netDot ${synced ? "ok" : ""}`}/>
-      <small>{network}</small>
-      <b>{me ? `Tu joues à ${me.side === "left" ? "gauche" : "droite"}` : "Mode spectateur"}</b>
-    </div>
-    {error && <div className="errorBox">{error}</div>}
   </section>;
 }
