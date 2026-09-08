@@ -29,7 +29,7 @@ function clampPad(side:Side,x:number,y:number){
   return{x:Math.max(side==="left"?.075:.53,Math.min(side==="left"?.47:.925,x)),y:Math.max(.085,Math.min(.915,y))};
 }
 
-export default function HockeyGame({room,user}:{room:Room;user:User}){
+export default function HockeyGame({room,user,onActiveChange}:{room:Room;user:User;onActiveChange?:(active:boolean)=>void}){
   const[game,setGame]=useState<Game|null>(null);
   const[error,setError]=useState("");
   const[busy,setBusy]=useState(false);
@@ -72,8 +72,12 @@ export default function HockeyGame({room,user}:{room:Room;user:User}){
   useEffect(()=>{
     const active=game?.status==="playing"||game?.status==="gameover";
     document.body.classList.toggle("hockey-match-active",Boolean(active));
-    return()=>document.body.classList.remove("hockey-match-active");
-  },[game?.status]);
+    onActiveChange?.(Boolean(active));
+    return()=>{
+      document.body.classList.remove("hockey-match-active");
+      onActiveChange?.(false);
+    };
+  },[game?.status,onActiveChange]);
 
   useEffect(()=>{
     if(!me||game?.status!=="playing")return;
