@@ -1,6 +1,12 @@
 # Retro Gaming
 
-Portail privé de mini-jeux entre amis. Cette première version contient l'infrastructure sociale, sans jeu activé pour le moment.
+Portail privé de mini-jeux entre amis avec rooms persistantes, chat et vocal de groupe.
+
+## Jeux
+
+- Hockey Arcade : 1v1, 2v1 et 2v2, équipes configurables, bots, score et temps personnalisables
+- Pong : 1v1 humain ou bot, score et temps personnalisables
+- Pierre · Feuille · Ciseaux : 1v1 humain ou bot, nombre de manches configurable
 
 ## Inclus
 
@@ -14,9 +20,9 @@ Portail privé de mini-jeux entre amis. Cette première version contient l'infra
 - Chat texte de room + notifications
 - Appel vocal de groupe WebRTC
 - Membres de room + transfert automatique de l'hôte
+- Rejouer ou retourner au lobby de chaque jeu
 - Supabase/Postgres
 - Création automatique des tables
-- Aucun jeu pour l'instant
 
 ## Vercel + Supabase
 
