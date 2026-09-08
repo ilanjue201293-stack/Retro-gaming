@@ -61,8 +61,8 @@ const TOP_BOARD = 0.045;
 const BOTTOM_BOARD = 0.955;
 const GOAL_MIN = 0.33;
 const GOAL_MAX = 0.67;
-const MAX_PUCK_SPEED = 2.9;
-const MAX_MALLET_SPEED = 2.6;
+const MAX_PUCK_SPEED = 1.45;
+const MAX_MALLET_SPEED = 1.85;
 const TARGET_SCORE = 7;
 const FACEOFF_MS = 3000;
 
