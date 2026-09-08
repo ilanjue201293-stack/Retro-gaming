@@ -116,12 +116,33 @@ export async function ensureSchema() {
           payload jsonb not null,
           created_at timestamptz not null default now()
         );
+        create table if not exists retro_hockey_games (
+          room_code text primary key references retro_rooms(code) on delete cascade,
+          mode text not null default '1v1',
+          status text not null default 'lobby',
+          authority_user_id text references retro_users(id) on delete set null,
+          players jsonb not null default '[]'::jsonb,
+          left_score integer not null default 0,
+          right_score integer not null default 0,
+          winner_side text,
+          updated_at timestamptz not null default now()
+        );
+        create table if not exists retro_hockey_signals (
+          id bigserial primary key,
+          room_code text not null references retro_rooms(code) on delete cascade,
+          sender_id text not null references retro_users(id) on delete cascade,
+          target_id text not null references retro_users(id) on delete cascade,
+          kind text not null,
+          payload jsonb not null,
+          created_at timestamptz not null default now()
+        );
         create index if not exists retro_sessions_expires_idx on retro_sessions(expires_at);
         create index if not exists retro_users_last_seen_idx on retro_users(last_seen);
         create index if not exists retro_room_members_room_idx on retro_room_members(room_code, joined_at);
         create index if not exists retro_room_invites_receiver_idx on retro_room_invites(receiver_id, created_at desc);
         create index if not exists retro_chat_room_created_idx on retro_chat_messages(room_code, created_at);
         create index if not exists retro_voice_signal_target_idx on retro_voice_signals(room_code, target_id, id);
+        create index if not exists retro_hockey_signal_target_idx on retro_hockey_signals(room_code, target_id, id);
       `);
     })().catch((error) => {
       globalThis.retroGamingSchemaPromise = undefined;
@@ -139,4 +160,5 @@ export async function cleanup() {
   await p.query(`delete from retro_rooms where expires_at < now()`);
   await p.query(`delete from retro_voice_participants where last_seen < now() - interval '15 seconds'`);
   await p.query(`delete from retro_voice_signals where created_at < now() - interval '10 minutes'`);
+  await p.query(`delete from retro_hockey_signals where created_at < now() - interval '10 minutes'`);
 }
