@@ -587,7 +587,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
 
       const current = gameRef.current;
       let directReady = false;
-      if (current?.status !== "lobby") {
+      if (current && current.status !== "lobby") {
         if (room.hostId === user.id) {
           const remotes = current.players.filter((player) => player.userId !== user.id);
           directReady = remotes.length > 0 && remotes.every((player) => peersRef.current.get(player.userId)?.dc?.readyState === "open");
