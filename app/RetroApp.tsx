@@ -3,6 +3,7 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import RoomComms from "./RoomComms";
 import HockeyGame from "./HockeyGame";
+import PongGame from "./PongGame";
 
 type User = { id: string; username: string };
 type Friend = { id: string; username: string; online: boolean };
@@ -309,6 +310,7 @@ export default function RetroApp() {
             </div>
 
             <HockeyGame room={room} user={user} onActiveChange={setHockeyActive}/>
+            <PongGame room={room} user={user}/>
           </section>
 
           <aside className="roomSide">
@@ -369,7 +371,7 @@ export default function RetroApp() {
         <section className="gamesPreview">
           <div className="panelHead">
             <div><span className="kicker">JEUX</span><h2>Bibliothèque</h2></div>
-            <span className="availablePill">1 JEU</span>
+            <span className="availablePill">2 JEUX</span>
           </div>
           <div className="gameLibraryCard">
             <div className="gameLibraryIcon">🏒</div>
@@ -377,6 +379,15 @@ export default function RetroApp() {
               <small>ARCADE · MULTIJOUEUR</small>
               <h3>Hockey Arcade</h3>
               <p>Hockey vu du dessus avec palet physique. Joue en 1v1 ou 2v2, au doigt ou à la souris.</p>
+            </div>
+            <button className="primaryButton" disabled={roomBusy} onClick={() => void createRoom()}>Créer une room</button>
+          </div>
+          <div className="gameLibraryCard">
+            <div className="gameLibraryIcon">▮·▮</div>
+            <div>
+              <small>CLASSIQUE · 2 JOUEURS</small>
+              <h3>Pong</h3>
+              <p>Le Pong classique : deux raquettes verticales, une balle carrée et un duel en 1 contre 1.</p>
             </div>
             <button className="primaryButton" disabled={roomBusy} onClick={() => void createRoom()}>Créer une room</button>
           </div>
