@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth";
-import { cleanup, db, ensureSchema } from "@/lib/db";
+import { db, ensureSchema } from "@/lib/db";
 import { ensureHockeyV3Schema } from "@/lib/hockey-schema";
 import { cleanRoomCode } from "@/lib/utils";
 import { requireRoomMember } from "@/lib/room";
@@ -214,8 +214,6 @@ function collidePaddle(
 
   const nx = dx / distance;
   const ny = dy / distance;
-
-  // Replace the puck just outside the current mallet so it cannot get stuck inside it.
   puck.x = pad.x + nx * minDistance;
   puck.y = pad.y + ny * minDistance;
 
@@ -324,8 +322,6 @@ async function tickSharedGame(
     const previousStep = Number(row.last_step_ms) || now;
     const elapsed = clamp((now - previousStep) / 1000, 0, 0.09);
 
-    // If two players poll at almost exactly the same instant, keep the accumulated time
-    // instead of resetting the physics clock with a meaningless zero-length step.
     if (elapsed < 0.003) {
       await client.query("commit");
       return { game, frame: frameFromRuntime(row) };
@@ -468,7 +464,6 @@ export async function POST(req: NextRequest) {
   try {
     await ensureSchema();
     await ensureHockeyV3Schema();
-    await cleanup();
 
     const user = await requireUser(req);
     const data = await payload(req);
