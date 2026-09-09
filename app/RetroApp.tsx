@@ -53,7 +53,6 @@ export default function RetroApp() {
   const [hockeyActive, setHockeyActive] = useState(false);
   const [activeGame, setActiveGame] = useState<"hockey" | "pool" | null>(null);
   const [selectedRoomGame, setSelectedRoomGame] = useState<RoomGameKey>("hockey");
-  const [gameFocus, setGameFocus] = useState(true);
 
   const me = useCallback(async () => {
     try {
@@ -87,7 +86,6 @@ export default function RetroApp() {
       const detail = (event as CustomEvent<RoomGameKey>).detail;
       if (!detail) return;
       setSelectedRoomGame(detail);
-      setGameFocus(true);
       if (detail !== "hockey" && detail !== "pool") setActiveGame(null);
     };
     window.addEventListener("retro:current-game", onCurrentGame as EventListener);
@@ -175,7 +173,6 @@ export default function RetroApp() {
     setUser(null);
     setRoom(null);
     setHockeyActive(false);
-    setGameFocus(true);
     setSocial(EMPTY_SOCIAL);
   };
 
@@ -194,7 +191,6 @@ export default function RetroApp() {
       const data = await post("/api/rooms", { action: "create" });
       if (game !== "hockey") await post("/api/game-room", { action: "setGame", code: data.room.code, game });
       setSelectedRoomGame(game);
-      setGameFocus(true);
       setRoom(data.room);
       setHockeyActive(false);
       localStorage.setItem(ROOM_KEY, data.room.code);
@@ -207,7 +203,6 @@ export default function RetroApp() {
       setRoomBusy(true); setError("");
       const data = await post("/api/rooms", { action: "join", code: codeValue });
       setRoom(data.room);
-      setGameFocus(true);
       setHockeyActive(false);
       localStorage.setItem(ROOM_KEY, data.room.code);
       setJoinCode("");
@@ -220,7 +215,6 @@ export default function RetroApp() {
       setRoomBusy(true); setError("");
       const data = await post("/api/rooms", { action: "acceptInvite", inviteId });
       setRoom(data.room);
-      setGameFocus(true);
       setHockeyActive(false);
       localStorage.setItem(ROOM_KEY, data.room.code);
     } catch (err) { setError(err instanceof Error ? err.message : "Erreur."); }
@@ -232,7 +226,6 @@ export default function RetroApp() {
     try { await post("/api/rooms", { action: "leave", code: room.code }); } catch {}
     localStorage.removeItem(ROOM_KEY);
     setHockeyActive(false);
-    setGameFocus(true);
     setRoom(null);
   };
 
@@ -272,7 +265,7 @@ export default function RetroApp() {
   }
 
   if (room) {
-    return <main className={`appShell ${hockeyActive ? "hockeyFocusShell" : ""} ${gameFocus ? "universalGameFocus" : "roomOverviewMode"}`}>
+    return <main className={`appShell ${hockeyActive ? "hockeyFocusShell" : ""}`}>
       {hockeyActive ? (
         <button className="hockeyQuitButton" onClick={() => void leaveRoom()}>Quitter</button>
       ) : (
@@ -281,14 +274,7 @@ export default function RetroApp() {
           <button className="roomCode" onClick={() => navigator.clipboard?.writeText(room.code).then(() => setToast("Code copié"))}>
             <small>ROOM</small><strong>{room.code}</strong><span>⧉</span>
           </button>
-          <button className="ghostButton returnRoomButton" onClick={() => {
-            if (gameFocus) {
-              setGameFocus(false);
-              window.dispatchEvent(new Event("retro:return-room"));
-            } else {
-              setGameFocus(true);
-            }
-          }}>{gameFocus ? "← Retour à la room" : "▶ Revenir au jeu"}</button>
+          <button className="ghostButton returnRoomButton" onClick={() => window.dispatchEvent(new Event("retro:return-room"))}>← Retour à la room</button>
           <button className="ghostButton dangerText" onClick={() => void leaveRoom()}>Quitter</button>
         </header>
       )}
@@ -310,13 +296,11 @@ export default function RetroApp() {
                 <span className={`presence ${member.online ? "online" : ""}`}/>
               </div>)}
             </div>
-            <div className="nativeRoomGameMount">
-              {selectedRoomGame === "hockey" && <HockeyGame room={room} user={user} onActiveChange={setHockeyActive}/>}
-              {selectedRoomGame === "pong" && <PongGame room={room} user={user}/>}
-              {selectedRoomGame === "rps" && <RpsGame room={room} user={user}/>}
-              {selectedRoomGame === "dunkshot" && <DunkshotGame room={room} user={user}/>}
-              {selectedRoomGame === "pool" && <PoolGame room={room} user={user}/>}
-            </div>
+            {selectedRoomGame === "hockey" && <HockeyGame room={room} user={user} onActiveChange={setHockeyActive}/>}
+            {selectedRoomGame === "pong" && <PongGame room={room} user={user}/>}
+            {selectedRoomGame === "rps" && <RpsGame room={room} user={user}/>}
+            {selectedRoomGame === "dunkshot" && <DunkshotGame room={room} user={user}/>}
+            {selectedRoomGame === "pool" && <PoolGame room={room} user={user}/>}
           </section>
           <aside className="roomSide">
             <section className="panel">
