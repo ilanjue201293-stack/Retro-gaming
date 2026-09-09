@@ -113,20 +113,16 @@ function parseResult(value: unknown): LastResult | null {
 
 const DUNK_BALL_START_X = 0.5;
 const DUNK_BALL_START_Y = 0.86;
-const DUNK_GRAVITY = 1.95;
+const DUNK_GRAVITY = 2.05;
+const DUNK_STEP = 1 / 180;
+const DUNK_RIM_Y_OFFSET = 0.065;
+const DUNK_RIM_HALF = 0.064;
+const DUNK_RIM_COLLISION_RADIUS = 0.038;
+const DUNK_SCORE_HALF = 0.050;
+const DUNK_FLOOR_Y = 0.94;
 
 function dunkClamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
-}
-
-function dunkTrajectory(power: number, aim: number, elapsed: number) {
-  const initialY = -(1.30 + dunkClamp(power, 0, 1) * 0.55);
-  const initialX = dunkClamp(aim, -1, 1) * (0.34 + dunkClamp(power, 0, 1) * 0.10);
-  return {
-    x: DUNK_BALL_START_X + initialX * elapsed,
-    y: DUNK_BALL_START_Y + initialY * elapsed + 0.5 * DUNK_GRAVITY * elapsed * elapsed,
-    velocityY: initialY + DUNK_GRAVITY * elapsed,
-  };
 }
 
 function dunkHoopPosition(streak: number, now: number) {
@@ -141,18 +137,59 @@ function dunkHoopPosition(streak: number, now: number) {
 }
 
 function dunkshotShotMade(shot: Shot, streak: number) {
-  let lastY = DUNK_BALL_START_Y;
-  const step = 1 / 240;
-  for (let elapsed = 0; elapsed <= 2.15; elapsed += step) {
-    const point = dunkTrajectory(shot.power, shot.aim, elapsed);
-    const hoop = dunkHoopPosition(streak, shot.startedAt + elapsed * 1000);
-    const rimY = hoop.y + 0.065;
-    if (lastY < rimY && point.y >= rimY && point.velocityY > 0 && Math.abs(point.x - hoop.x) <= 0.071) return true;
-    lastY = point.y;
-    if ((elapsed > 0.55 && point.y > 1.14) || Math.abs(point.x) > 1.28) break;
+  const power = dunkClamp(shot.power, 0, 1);
+  let x = DUNK_BALL_START_X;
+  let y = DUNK_BALL_START_Y;
+  let vx = dunkClamp(shot.aim, -1, 1) * (0.32 + power * 0.16);
+  let vy = -(1.08 + power * 0.83);
+  let floorBounces = 0;
+  let made = false;
+
+  for (let elapsed = 0; elapsed <= 2.65; elapsed += DUNK_STEP) {
+    const previousY = y;
+    vy += DUNK_GRAVITY * DUNK_STEP;
+    x += vx * DUNK_STEP;
+    y += vy * DUNK_STEP;
+
+    const hoop = dunkHoopPosition(streak, shot.startedAt + (elapsed + DUNK_STEP) * 1000);
+    const rimY = hoop.y + DUNK_RIM_Y_OFFSET;
+
+    if (!made && floorBounces === 0 && previousY < rimY && y >= rimY && vy > 0 && Math.abs(x - hoop.x) < DUNK_SCORE_HALF) {
+      made = true;
+      break;
+    }
+
+    if (floorBounces === 0) {
+      for (const rimX of [hoop.x - DUNK_RIM_HALF, hoop.x + DUNK_RIM_HALF]) {
+        const dx = x - rimX;
+        const dy = y - rimY;
+        const distance = Math.hypot(dx, dy);
+        if (distance > 0.0001 && distance < DUNK_RIM_COLLISION_RADIUS) {
+          const nx = dx / distance;
+          const ny = dy / distance;
+          const approach = vx * nx + vy * ny;
+          if (approach < 0) {
+            const restitution = 0.72;
+            vx -= (1 + restitution) * approach * nx;
+            vy -= (1 + restitution) * approach * ny;
+            vx *= 0.97;
+            vy *= 0.97;
+            x = rimX + nx * DUNK_RIM_COLLISION_RADIUS;
+            y = rimY + ny * DUNK_RIM_COLLISION_RADIUS;
+          }
+        }
+      }
+    }
+
+    if (y >= DUNK_FLOOR_Y && vy > 0) {
+      floorBounces += 1;
+      break;
+    }
+    if (Math.abs(x) > 1.4) break;
   }
-  return false;
+  return made;
 }
+
 function output(row: Row) {
   return {
     status: row.status,
