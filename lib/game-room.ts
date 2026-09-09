@@ -24,8 +24,12 @@ export async function ensureGameRoomSchema() {
         board jsonb not null default '["","","","","","","","",""]'::jsonb,
         turn text not null default 'X',
         winner text,
+        bot_o boolean not null default false,
+        bot_difficulty text not null default 'normal',
         updated_at timestamptz not null default now()
       );
+      alter table retro_tictactoe_games add column if not exists bot_o boolean not null default false;
+      alter table retro_tictactoe_games add column if not exists bot_difficulty text not null default 'normal';
     `).then(() => undefined).catch((error) => {
       schemaPromise = null;
       throw error;
