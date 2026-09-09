@@ -12,7 +12,7 @@ type Ball = { id: number; x: number; y: number; vx: number; vy: number; pocketed
 type Shot = { id: string; shooterId: string; angle: number; power: number; startedAt: number };
 type Row = { room_code: string; status: "lobby" | "playing" | "gameover"; players: unknown; turn_index: number; balls: unknown; groups: unknown; shot: unknown; winner_id: string | null; last_message: string | null };
 
-type Simulation = { balls: Ball[]; elapsed: number };
+type Simulation = { balls: Ball[]; elapsed: number; pocketOrder: number[] };
 const BALL_R = 0.013;
 const STEP = 1 / 180;
 const MAX_SHOT_TIME = 6.5;
@@ -84,7 +84,7 @@ function stepSimulation(simulation: Simulation) {
     if (ball.pocketed) continue;
     ball.x += ball.vx * STEP; ball.y += ball.vy * STEP;
     for (const pocket of POCKETS) {
-      if (Math.hypot(ball.x - pocket.x, ball.y - pocket.y) <= POCKET_R) { ball.x = pocket.x; ball.y = pocket.y; ball.vx = 0; ball.vy = 0; ball.pocketed = true; break; }
+      if (Math.hypot(ball.x - pocket.x, ball.y - pocket.y) <= POCKET_R) { ball.x = pocket.x; ball.y = pocket.y; ball.vx = 0; ball.vy = 0; ball.pocketed = true; simulation.pocketOrder.push(ball.id); break; }
     }
     if (ball.pocketed) continue;
     if (ball.x - BALL_R < LEFT) { ball.x = LEFT + BALL_R; ball.vx = Math.abs(ball.vx) * 0.91; }
@@ -125,9 +125,9 @@ function simulateShot(source: Ball[], shot: Shot) {
     const speed = 0.34 + clamp(shot.power, 0, 1) * 1.25;
     cue.vx = Math.cos(shot.angle) * speed; cue.vy = Math.sin(shot.angle) * speed;
   }
-  const simulation: Simulation = { balls, elapsed: 0 };
+  const simulation: Simulation = { balls, elapsed: 0, pocketOrder: [] };
   while (simulation.elapsed < MAX_SHOT_TIME && simulation.balls.some((ball) => !ball.pocketed && Math.hypot(ball.vx, ball.vy) >= STOP_SPEED)) stepSimulation(simulation);
-  return simulation.balls;
+  return { balls: simulation.balls, pocketOrder: simulation.pocketOrder };
 }
 
 let schemaPromise: Promise<void> | null = null;
@@ -241,31 +241,38 @@ export async function POST(req: NextRequest) {
         if (shot.shooterId !== user.id) throw new Error("Seul le tireur peut valider le coup.");
         const players = parsePlayers(current.players); const shooterIndex = Math.max(0, current.turn_index) % Math.max(1, players.length); const shooter = players[shooterIndex]; const opponent = players[(shooterIndex + 1) % players.length];
         if (!shooter || !opponent) throw new Error("Joueurs invalides.");
-        const before = parseBalls(current.balls); const simulated = simulateShot(before, shot);
+        const before = parseBalls(current.balls); const simulationResult = simulateShot(before, shot); const simulated = simulationResult.balls;
         const previouslyPocketed = new Set(before.filter((ball) => ball.pocketed).map((ball) => ball.id));
-        const pocketed = simulated.filter((ball) => ball.pocketed && !previouslyPocketed.has(ball.id)).map((ball) => ball.id);
+        const pocketed = simulationResult.pocketOrder.filter((id) => !previouslyPocketed.has(id));
         const scratch = pocketed.includes(0); const black = pocketed.includes(8);
         const groups = parseGroups(current.groups);
+        const wasUnassigned = !groups[shooter.userId];
         let shooterGroup = groups[shooter.userId] ?? null;
         if (!shooterGroup) {
           const firstColored = pocketed.find((id) => id !== 0 && id !== 8);
           const assigned = firstColored ? ballGroup(firstColored) : null;
           if (assigned) { shooterGroup = assigned; groups[shooter.userId] = assigned; groups[opponent.userId] = assigned === "solids" ? "stripes" : "solids"; }
         }
+        const opponentGroup = groups[opponent.userId] ?? (shooterGroup === "solids" ? "stripes" : shooterGroup === "stripes" ? "solids" : null);
         let winnerId: string | null = null;
         if (black) {
           const ownRemaining = shooterGroup ? simulated.some((ball) => !ball.pocketed && ballGroup(ball.id) === shooterGroup) : simulated.some((ball) => !ball.pocketed && ball.id !== 0 && ball.id !== 8);
           winnerId = !scratch && !ownRemaining ? shooter.userId : opponent.userId;
         }
         const pocketedOwn = Boolean(shooterGroup && pocketed.some((id) => ballGroup(id) === shooterGroup));
-        const nextTurn = winnerId ? shooterIndex : (!scratch && pocketedOwn ? shooterIndex : (shooterIndex + 1) % players.length);
+        const pocketedWrong = Boolean(opponentGroup && pocketed.some((id) => ballGroup(id) === opponentGroup));
+        const nextTurn = winnerId ? shooterIndex : (!scratch && pocketedOwn && !pocketedWrong ? shooterIndex : (shooterIndex + 1) % players.length);
         const finalBalls = respawnCue(simulated);
         let message = "Aucune bille empochée.";
         if (winnerId) message = winnerId === shooter.userId ? "Noire empochée : victoire !" : "Noire empochée trop tôt : défaite.";
         else if (scratch) message = "Faute : blanche empochée. Tour adverse.";
+        else if (pocketedWrong) message = `Mauvaise bille empochée : ${opponent.username} récupère la main.`;
         else if (pocketedOwn) message = `${shooter.username} garde la main.`;
         else if (pocketed.some((id) => id !== 0)) message = "Bille empochée, mais le tour change.";
-        if (shooterGroup && !parseGroups(current.groups)[shooter.userId]) message = `${shooter.username} joue les ${shooterGroup === "solids" ? "pleines" : "rayées"}.`;
+        if (wasUnassigned && shooterGroup) {
+          const assignment = `${shooter.username} prend les ${shooterGroup === "solids" ? "pleines" : "rayées"}.`;
+          message = pocketedWrong ? `${assignment} Une bille adverse est aussi tombée : tour à ${opponent.username}.` : pocketedOwn ? `${assignment} Il garde la main.` : assignment;
+        }
         await client.query(`update retro_pool_games set status=$1,turn_index=$2,balls=$3::jsonb,groups=$4::jsonb,shot=null,winner_id=$5,last_message=$6,updated_at=now() where room_code=$7`, [winnerId ? "gameover" : "playing", nextTurn, JSON.stringify(finalBalls), JSON.stringify(groups), winnerId, message, code]);
         await client.query("commit"); return NextResponse.json({ ok: true, game: await state(code) });
       } catch (error) { try { await client.query("rollback"); } catch {} throw error; } finally { client.release(); }

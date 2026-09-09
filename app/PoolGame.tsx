@@ -11,6 +11,7 @@ type Ball = { id: number; x: number; y: number; vx: number; vy: number; pocketed
 type Shot = { id: string; shooterId: string; angle: number; power: number; startedAt: number };
 type Game = { status: "lobby" | "playing" | "gameover"; players: Player[]; turnIndex: number; balls: Ball[]; groups: Record<string, Group>; shot: Shot | null; winnerId: string | null; lastMessage: string | null };
 type Aim = { angle: number; power: number };
+type AimPrediction = { ballId: number; x: number; y: number; angle: number };
 type Simulation = { balls: Ball[]; accumulator: number; elapsed: number };
 
 const BALL_R = 0.013;
@@ -46,6 +47,36 @@ function groupLabel(group: Group) {
   if (group === "solids") return "PLEINES";
   if (group === "stripes") return "RAYÉES";
   return "LIBRE";
+}
+
+function predictAimCollision(cue: Ball, balls: Ball[], angle: number): AimPrediction | null {
+  const dirX = Math.cos(angle), dirY = Math.sin(angle);
+  const collisionRadius = BALL_R * 2;
+  const limits: number[] = [];
+  if (dirX > 0.000001) limits.push((RIGHT - BALL_R - cue.x) / dirX);
+  else if (dirX < -0.000001) limits.push((LEFT + BALL_R - cue.x) / dirX);
+  if (dirY > 0.000001) limits.push((BOTTOM - BALL_R - cue.y) / dirY);
+  else if (dirY < -0.000001) limits.push((TOP + BALL_R - cue.y) / dirY);
+  const railDistance = Math.min(...limits.filter((value) => value > 0));
+
+  let bestDistance = Number.POSITIVE_INFINITY;
+  let best: AimPrediction | null = null;
+  for (const ball of balls) {
+    if (ball.id === 0 || ball.pocketed) continue;
+    const relX = ball.x - cue.x, relY = ball.y - cue.y;
+    const projection = relX * dirX + relY * dirY;
+    if (projection <= 0) continue;
+    const perpendicularSquared = relX * relX + relY * relY - projection * projection;
+    const radiusSquared = collisionRadius * collisionRadius;
+    if (perpendicularSquared > radiusSquared) continue;
+    const hitDistance = projection - Math.sqrt(Math.max(0, radiusSquared - perpendicularSquared));
+    if (hitDistance <= 0 || hitDistance >= bestDistance || (Number.isFinite(railDistance) && hitDistance > railDistance)) continue;
+    const impactX = cue.x + dirX * hitDistance, impactY = cue.y + dirY * hitDistance;
+    const normalX = ball.x - impactX, normalY = ball.y - impactY;
+    bestDistance = hitDistance;
+    best = { ballId: ball.id, x: ball.x, y: ball.y, angle: Math.atan2(normalY, normalX) };
+  }
+  return best;
 }
 
 function respawnCue(balls: Ball[]) {
@@ -160,6 +191,7 @@ export default function PoolGame({ room, user }: { room: Room; user: User }) {
   const currentPlayer = game?.players[game.turnIndex % Math.max(1, game.players.length)] ?? null;
   const canShoot = soloActive ? !soloDone && !soloShot : game?.status === "playing" && !game.shot && currentPlayer?.userId === user.id;
   const cueBall = visualBalls.find((ball) => ball.id === 0 && !ball.pocketed) ?? baseBalls.find((ball) => ball.id === 0 && !ball.pocketed) ?? null;
+  const aimPrediction = cueBall && aim ? predictAimCollision(cueBall, visualBalls, aim.angle) : null;
 
   useEffect(() => {
     if (!opponents.length) { setSelectedOpponent(""); return; }
@@ -296,9 +328,20 @@ export default function PoolGame({ room, user }: { room: Room; user: User }) {
   const instruction = activeShot ? "LES BILLES ROULENT…" : canShoot ? "ATTRAPE LA BLANCHE · TIRE VERS L'ARRIÈRE · RELÂCHE" : soloActive ? "PRÉPARE TON COUP" : `AU TOUR DE ${currentPlayer?.username?.toUpperCase() ?? "…"}`;
   const powerClass = !aim ? "" : aim.power < 0.42 ? "low" : aim.power < 0.78 ? "mid" : "high";
   const guideStyle = cueBall && aim ? ({ left: `${cueBall.x * 100}%`, top: `${cueBall.y * 200}%`, transform: `rotate(${aim.angle}rad)` } as CSSProperties) : undefined;
+  const predictionStyle = aimPrediction ? ({ left: `${aimPrediction.x * 100}%`, top: `${aimPrediction.y * 200}%`, transform: `rotate(${aimPrediction.angle}rad)` } as CSSProperties) : undefined;
+  const pocketRail = (player: Player | undefined) => {
+    const group = player ? game.groups[player.userId] ?? null : null;
+    const ids = group === "solids" ? [1,2,3,4,5,6,7] : group === "stripes" ? [9,10,11,12,13,14,15] : [];
+    const pocketed = new Set((game.balls ?? []).filter((ball) => ball.pocketed).map((ball) => ball.id));
+    return Array.from({ length: 7 }, (_, index) => {
+      const id = ids[index];
+      const filled = Boolean(id && pocketed.has(id));
+      return <span key={`${player?.userId ?? "empty"}-${index}`} className={`poolHudBall ${filled ? `filled ball-${id}` : ""}`}><i>{filled ? id : ""}</i></span>;
+    });
+  };
 
   return <section className="poolGameWrap">
-    <div className="poolHud">{soloActive ? <><div><small>MODE</small><strong>SOLO</strong></div><div className="poolHudCenter"><small>EMPOCHÉES</small><strong>{soloPocketed}/15</strong></div><div className="poolHudRight"><small>RESTANTES</small><strong>{15 - soloPocketed}</strong></div></> : <>{playerOne && <div className={`poolPlayerHud ${game.status === "playing" && game.turnIndex === 0 ? "turn" : ""}`}><small>{groupLabel(game.groups[playerOne.userId])}</small><strong>{playerOne.username}</strong></div>}<div className="poolHudCenter"><small>TOUR</small><strong>{currentPlayer?.username ?? "—"}</strong></div>{playerTwo && <div className={`poolPlayerHud right ${game.status === "playing" && game.turnIndex === 1 ? "turn" : ""}`}><small>{groupLabel(game.groups[playerTwo.userId])}</small><strong>{playerTwo.username}</strong></div>}</>}</div>
+    <div className="poolHud">{soloActive ? <><div><small>MODE</small><strong>SOLO</strong></div><div className="poolHudCenter"><small>EMPOCHÉES</small><strong>{soloPocketed}/15</strong></div><div className="poolHudRight"><small>RESTANTES</small><strong>{15 - soloPocketed}</strong></div></> : <>{playerOne && <div className={`poolPlayerHud ${game.status === "playing" && game.turnIndex === 0 ? "turn" : ""}`}><small>{groupLabel(game.groups[playerOne.userId])}</small><strong>{playerOne.username}</strong><div className="poolHudBalls">{pocketRail(playerOne)}</div></div>}<div className="poolHudCenter"><small>TOUR</small><strong>{currentPlayer?.username ?? "—"}</strong></div>{playerTwo && <div className={`poolPlayerHud right ${game.status === "playing" && game.turnIndex === 1 ? "turn" : ""}`}><small>{groupLabel(game.groups[playerTwo.userId])}</small><strong>{playerTwo.username}</strong><div className="poolHudBalls right">{pocketRail(playerTwo)}</div></div>}</>}</div>
     <div className="poolInstruction"><span>{instruction}</span>{aim && <strong>{Math.round(aim.power * 100)}%</strong>}</div>
     <div ref={tableRef} className={`poolTable ${canShoot ? "canShoot" : ""}`} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp}>
       <div className="poolWood"/><div className="poolFelt"/>
@@ -306,7 +349,7 @@ export default function PoolGame({ room, user }: { room: Room; user: User }) {
       <div className="poolHeadLine"/><div className="poolHeadSpot"/>
       {[0.25, 0.5, 0.75].map((x) => <i key={`top-${x}`} className="poolDiamond top" style={{ left: `${x * 100}%` }}/>) }
       {[0.25, 0.5, 0.75].map((x) => <i key={`bottom-${x}`} className="poolDiamond bottom" style={{ left: `${x * 100}%` }}/>) }
-      {aim && cueBall && !activeShot && <><div className="poolGuide" style={guideStyle}><span/></div><div className={`poolCueWrap ${powerClass}`} style={guideStyle}><div className="poolCueStick" style={{ width: `${150 + aim.power * 150}px`, right: `${22 + aim.power * 72}px` }}/></div></>}
+      {aim && cueBall && !activeShot && <><div className="poolGuide" style={guideStyle}><span/></div>{aimPrediction && <div className="poolTargetPrediction" style={predictionStyle}><i/></div>}<div className={`poolCueWrap ${powerClass}`} style={guideStyle}><div className="poolCueStick" style={{ width: `${150 + aim.power * 150}px`, right: `${22 + aim.power * 72}px` }}/></div></>}
       {visualBalls.filter((ball) => !ball.pocketed).map((ball) => <div key={ball.id} className={`poolBall ball-${ball.id} ${ball.id === 0 ? "cueBall" : ""}`} style={{ left: `${ball.x * 100}%`, top: `${ball.y * 200}%` }}><span>{ball.id === 0 ? "" : ball.id}</span></div>)}
       {aim && <div className={`poolPower ${powerClass}`}><small>PUISSANCE</small><div><i style={{ height: `${Math.max(4, aim.power * 100)}%` }}/></div><strong>{Math.round(aim.power * 100)}</strong></div>}
       {(soloDone || game.status === "gameover") && <div className="poolGameOver"><span>🎱</span><small>{soloDone ? "TABLE NETTOYÉE" : "PARTIE TERMINÉE"}</small><h2>{soloDone ? "Bien joué !" : `${winner?.username ?? "Joueur"} gagne !`}</h2>{soloDone ? <div className="gameEndActions"><button className="primaryButton" onClick={startSolo}>Rejouer</button><button className="secondaryButton" onClick={exitSolo}>Lobby du jeu</button></div> : isHost ? <div className="gameEndActions"><button className="primaryButton" disabled={busy} onClick={() => void startDuel(game.players.find((player) => player.userId !== user.id)?.userId ?? selectedOpponent)}>Rejouer</button><button className="secondaryButton" disabled={busy} onClick={() => void stopDuel()}>Lobby du jeu</button></div> : <small>En attente de l'hôte…</small>}</div>}
