@@ -304,7 +304,7 @@ export default function PoolGame({ room, user }: { room: Room; user: User }) {
 
   const normalizedPointer = (event: PointerEvent<HTMLDivElement>) => {
     const rect = tableRef.current?.getBoundingClientRect(); if (!rect) return null;
-    return { x: clamp((event.clientX - rect.left) / rect.width, 0, 1), y: clamp((event.clientY - rect.top) / rect.height * 0.5, 0, 0.5) };
+    return { x: (event.clientX - rect.left) / rect.width, y: (event.clientY - rect.top) / rect.height * 0.5 };
   };
   const pointerDown = (event: PointerEvent<HTMLDivElement>) => {
     if (!canShoot || activeShot || !cueBall) return;
@@ -316,7 +316,10 @@ export default function PoolGame({ room, user }: { room: Room; user: User }) {
     if (!dragRef.current || dragRef.current.pointerId !== event.pointerId || !cueBall) return;
     const point = normalizedPointer(event); if (!point) return;
     const dx = cueBall.x - point.x, dy = cueBall.y - point.y;
-    setAim({ angle: Math.atan2(dy, dx), power: clamp(Math.hypot(dx, dy) / 0.23, 0, 1) });
+    const rawPower = clamp(Math.hypot(dx, dy) / 0.23, 0, 1);
+    const edgeReached = event.clientX <= 22 || event.clientX >= window.innerWidth - 22 || event.clientY <= 22 || event.clientY >= window.innerHeight - 22;
+    const power = edgeReached && rawPower >= 0.12 ? 1 : rawPower;
+    setAim({ angle: Math.atan2(dy, dx), power });
   };
   const shoot = async (angle: number, power: number) => {
     setAim(null);

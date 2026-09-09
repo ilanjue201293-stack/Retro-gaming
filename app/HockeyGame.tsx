@@ -257,7 +257,7 @@ function stepSimulation(simulation: Simulation, players: Player[], mode: Mode, d
 }
 
 function predictPuck(puck: Puck, ageSeconds: number) {
-  const dt = Math.min(ageSeconds, 0.11);
+  const dt = Math.min(ageSeconds, 0.24);
   let x = puck.x + puck.vx * dt, y = puck.y + puck.vy * dt, vx = puck.vx, vy = puck.vy;
   const minY = TOP_BOARD + PUCK_R, maxY = BOTTOM_BOARD - PUCK_R, minX = LEFT_BOARD + PUCK_R, maxX = RIGHT_BOARD - PUCK_R;
   if (y < minY) { y = minY + (minY - y); vy = Math.abs(vy); } else if (y > maxY) { y = maxY - (y - maxY); vy = -Math.abs(vy); }
@@ -374,6 +374,10 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
   const directAckRef = useRef<Map<string, number>>(new Map());
   const lastDirectStateAtRef = useRef(0);
   const peerStartedAtRef = useRef<Map<string, number>>(new Map());
+  const stateSequenceRef = useRef(0);
+  const inputSequenceRef = useRef(0);
+  const lastRemoteStateSequenceRef = useRef(-1);
+  const lastRemoteInputSequenceRef = useRef<Map<string, number>>(new Map());
 
   useEffect(() => { gameRef.current = game; }, [game]);
   useEffect(() => {
@@ -469,7 +473,13 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
     for (const candidate of queue) { try { await pc.addIceCandidate(candidate); } catch {} }
   }, []);
 
-  const receiveInput = useCallback((senderId: string, payloadValue: unknown) => {
+  const receiveInput = useCallback((senderId: string, payloadValue: unknown, sequenceValue?: unknown) => {
+    const sequence = Number(sequenceValue);
+    if (Number.isFinite(sequence)) {
+      const previous = lastRemoteInputSequenceRef.current.get(senderId) ?? -1;
+      if (sequence <= previous) return;
+      lastRemoteInputSequenceRef.current.set(senderId, sequence);
+    }
     const current = gameRef.current, simulation = simulationRef.current;
     if (!current || !simulation || room.hostId !== user.id || Date.now() < simulation.frame.pauseUntil) return;
     const player = current.players.find((entry) => entry.userId === senderId);
@@ -481,7 +491,12 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
     simulation.targets[senderId] = { x: point.x, y: point.y, vx: velocity.x, vy: velocity.y };
   }, [room.hostId, user.id]);
 
-  const receiveState = useCallback((payloadValue: unknown) => {
+  const receiveState = useCallback((payloadValue: unknown, sequenceValue?: unknown) => {
+    const sequence = Number(sequenceValue);
+    if (Number.isFinite(sequence)) {
+      if (sequence <= lastRemoteStateSequenceRef.current) return;
+      lastRemoteStateSequenceRef.current = sequence;
+    }
     if (!payloadValue || typeof payloadValue !== "object") return;
     const incoming = payloadValue as Frame; if (!incoming.puck || !incoming.paddles) return;
     const copy = cloneFrame(incoming), current = gameRef.current;
@@ -495,15 +510,15 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
     channel.onopen = () => {
       reconnectingRef.current.delete(peerId);
       if (hostSide) directAckRef.current.set(peerId, performance.now()); else lastDirectStateAtRef.current = performance.now();
-      if (hostSide && simulationRef.current && channel.readyState === "open") { try { channel.send(JSON.stringify({ type: "state", state: simulationRef.current.frame })); } catch {} }
+      if (hostSide && simulationRef.current && channel.readyState === "open") { try { channel.send(JSON.stringify({ type: "state", seq: ++stateSequenceRef.current, state: simulationRef.current.frame })); } catch {} }
     };
     channel.onmessage = (event) => {
       try {
         const message = JSON.parse(String(event.data));
-        if (hostSide && message.type === "input") receiveInput(peerId, message.input);
+        if (hostSide && message.type === "input") receiveInput(peerId, message.input, message.seq);
         else if (hostSide && message.type === "ack") directAckRef.current.set(peerId, performance.now());
         else if (!hostSide && message.type === "state") {
-          lastDirectStateAtRef.current = performance.now(); receiveState(message.state);
+          lastDirectStateAtRef.current = performance.now(); receiveState(message.state, message.seq);
           if (channel.readyState === "open") { try { channel.send(JSON.stringify({ type: "ack" })); } catch {} }
         }
       } catch {}
@@ -522,16 +537,16 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
 
   const startHostPeer = useCallback(async (peerId: string) => {
     if (peerId === user.id || reconnectingRef.current.has(peerId)) return;
-    const existing = peersRef.current.get(peerId); const now = performance.now(); const ackAge = now - (directAckRef.current.get(peerId) ?? 0); const connectingAge = now - (peerStartedAtRef.current.get(peerId) ?? 0); if (existing?.dc?.readyState === "open" && ackAge < 1800) return; if (existing?.pc.connectionState === "connecting" && connectingAge < 3500) return;
+    const existing = peersRef.current.get(peerId); const now = performance.now(); const ackAge = now - (directAckRef.current.get(peerId) ?? 0); const connectingAge = now - (peerStartedAtRef.current.get(peerId) ?? 0); if (existing?.dc?.readyState === "open" && ackAge < 4500) return; if ((existing?.pc.connectionState === "connecting" || existing?.pc.connectionState === "new") && connectingAge < 6500) return;
     reconnectingRef.current.add(peerId);
-    try { if (existing) closePeer(peerId); const entry = makePeer(peerId, true); const channel = entry.pc.createDataChannel("retro-hockey", { ordered: false, maxPacketLifeTime: 180 }); entry.dc = channel; attachDataChannel(peerId, channel, true); const offer = await entry.pc.createOffer(); await entry.pc.setLocalDescription(offer); await sendSignal(peerId, "offer", offer); }
+    try { if (existing) closePeer(peerId); const entry = makePeer(peerId, true); const channel = entry.pc.createDataChannel("retro-hockey", { ordered: false, maxPacketLifeTime: 240 }); entry.dc = channel; attachDataChannel(peerId, channel, true); const offer = await entry.pc.createOffer(); await entry.pc.setLocalDescription(offer); await sendSignal(peerId, "offer", offer); }
     catch { closePeer(peerId); } finally { window.setTimeout(() => reconnectingRef.current.delete(peerId), 600); }
   }, [attachDataChannel, closePeer, makePeer, sendSignal, user.id]);
 
   const handleSignal = useCallback(async (signal: Signal) => {
     const current = gameRef.current; if (!current || current.status === "lobby") return; const hostId = room.hostId;
-    if (signal.kind === "input") { if (user.id === hostId) receiveInput(signal.senderId, signal.payload); return; }
-    if (signal.kind === "state") { if (user.id !== hostId && signal.senderId === hostId) receiveState(signal.payload); return; }
+    if (signal.kind === "input") { if (user.id === hostId) { const wrapped = signal.payload as { seq?: unknown; input?: unknown } | null; receiveInput(signal.senderId, wrapped && typeof wrapped === "object" && "input" in wrapped ? wrapped.input : signal.payload, wrapped?.seq); } return; }
+    if (signal.kind === "state") { if (user.id !== hostId && signal.senderId === hostId) { const wrapped = signal.payload as { seq?: unknown; state?: unknown } | null; receiveState(wrapped && typeof wrapped === "object" && "state" in wrapped ? wrapped.state : signal.payload, wrapped?.seq); } return; }
     if (user.id === hostId) {
       if (signal.senderId === user.id) return; const entry = peersRef.current.get(signal.senderId);
       if (signal.kind === "answer" && entry) { try { await entry.pc.setRemoteDescription(signal.payload as RTCSessionDescriptionInit); await flushIce(signal.senderId, entry.pc); } catch { closePeer(signal.senderId); } }
@@ -564,7 +579,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
 
   useEffect(() => {
     if (!game || game.status === "lobby") { closeAllPeers(); simulationRef.current = null; remoteSnapshotRef.current = null; signalCursorRef.current = 0; localInputRef.current = null; localPaddleRef.current = null; draggingRef.current = false; setFrame(null); return; }
-    signalCursorRef.current = 0; resetLocalToStart(game);
+    signalCursorRef.current = 0; stateSequenceRef.current = 0; inputSequenceRef.current = 0; lastRemoteStateSequenceRef.current = -1; lastRemoteInputSequenceRef.current.clear(); resetLocalToStart(game);
     const initialPauseUntil = Math.max(Date.now(), game.frame?.pauseUntil ?? ((game.startedAt ?? Date.now()) + INITIAL_COUNTDOWN_MS));
     if (room.hostId === user.id) {
       const key = `${game.mode}:${rosterKey}`;
@@ -591,10 +606,10 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
       if (current && current.status !== "lobby") {
         if (room.hostId === user.id) {
           const remotes = current.players.filter((player) => player.userId !== user.id && !player.isBot);
-          directReady = remotes.length > 0 && remotes.every((player) => peersRef.current.get(player.userId)?.dc?.readyState === "open" && now - (directAckRef.current.get(player.userId) ?? 0) < 1200);
-        } else directReady = peersRef.current.get(room.hostId)?.dc?.readyState === "open" && now - lastDirectStateAtRef.current < 1200;
+          directReady = remotes.length > 0 && remotes.every((player) => peersRef.current.get(player.userId)?.dc?.readyState === "open" && now - (directAckRef.current.get(player.userId) ?? 0) < 2500);
+        } else directReady = peersRef.current.get(room.hostId)?.dc?.readyState === "open" && now - lastDirectStateAtRef.current < 2500;
       }
-      timer = window.setTimeout(() => void signalPoll(), directReady ? 700 : 120);
+      timer = window.setTimeout(() => void signalPoll(), directReady ? 850 : 70);
     };
     void signalPoll(); return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };
   }, [game?.status, handleSignal, room.code, room.hostId, user.id]);
@@ -602,7 +617,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
   useEffect(() => {
     if (!game || game.status !== "playing" || room.hostId !== user.id) return;
     const ensure = () => { const current = gameRef.current; if (!current || current.status === "lobby") return; for (const player of current.players) if (player.userId !== user.id && !player.isBot) void startHostPeer(player.userId); };
-    ensure(); const id = window.setInterval(ensure, 900); return () => window.clearInterval(id);
+    ensure(); const id = window.setInterval(ensure, 1500); return () => window.clearInterval(id);
   }, [game?.status, room.hostId, startHostPeer, user.id]);
 
   const checkpoint = useCallback((leftScore: number, rightScore: number, winnerSide?: Side | null) => { void post({ action: "hockeyCheckpoint", code: room.code, leftScore, rightScore, winnerSide: winnerSide ?? null }).catch(() => undefined); }, [room.code]);
@@ -639,8 +654,8 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
       if (simulation.frame.leftScore !== simulation.lastCheckpointLeft || simulation.frame.rightScore !== simulation.lastCheckpointRight) {
         simulation.lastCheckpointLeft = simulation.frame.leftScore; simulation.lastCheckpointRight = simulation.frame.rightScore; resetLocalToStart(current); checkpoint(simulation.frame.leftScore, simulation.frame.rightScore, simulation.frame.winnerSide);
       }
-      if (now - simulation.lastBroadcast >= 33) { simulation.lastBroadcast = now; const message = JSON.stringify({ type: "state", state: simulation.frame }); for (const player of current.players) { if (player.userId === user.id || player.isBot) continue; const channel = peersRef.current.get(player.userId)?.dc; if (channel?.readyState === "open") { try { channel.send(message); } catch {} } } }
-      if (now - simulation.lastFallbackBroadcast >= 150) { simulation.lastFallbackBroadcast = now; for (const player of current.players) { if (player.userId === user.id || player.isBot) continue; const channel = peersRef.current.get(player.userId)?.dc; const healthy = channel?.readyState === "open" && now - (directAckRef.current.get(player.userId) ?? 0) < 900; if (!healthy) void sendSignal(player.userId, "state", simulation.frame).catch(() => undefined); } }
+      if (now - simulation.lastBroadcast >= 33) { simulation.lastBroadcast = now; const seq = ++stateSequenceRef.current; const message = JSON.stringify({ type: "state", seq, state: simulation.frame }); for (const player of current.players) { if (player.userId === user.id || player.isBot) continue; const channel = peersRef.current.get(player.userId)?.dc; if (channel?.readyState === "open" && channel.bufferedAmount < 32768) { try { channel.send(message); } catch {} } } }
+      if (now - simulation.lastFallbackBroadcast >= 85) { simulation.lastFallbackBroadcast = now; const seq = ++stateSequenceRef.current; for (const player of current.players) { if (player.userId === user.id || player.isBot) continue; const channel = peersRef.current.get(player.userId)?.dc; const healthy = channel?.readyState === "open" && channel.bufferedAmount < 32768 && now - (directAckRef.current.get(player.userId) ?? 0) < 2200; if (!healthy) void sendSignal(player.userId, "state", { seq, state: simulation.frame }).catch(() => undefined); } }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick); return () => cancelAnimationFrame(raf);
@@ -648,15 +663,16 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
 
   useEffect(() => {
     if (!game || game.status === "lobby" || room.hostId === user.id) return; let raf = 0;
-    const draw = (now: number) => { const current = gameRef.current, snapshot = remoteSnapshotRef.current; if (current && snapshot) { const age = (now - snapshot.receivedAt) / 1000, next = cloneFrame(snapshot.frame); if (Date.now() >= next.pauseUntil && !next.winnerSide) next.puck = predictPuck(next.puck, age); for (const player of current.players) { const server = snapshot.frame.paddles[player.userId] ?? initialPaddle(player, current.mode); if (player.userId === user.id && localPaddleRef.current) next.paddles[player.userId] = { ...server, ...localPaddleRef.current }; else { const dt = Math.min(age, 0.075), predicted = clampPaddle(player.side, server.x + server.vx * dt, server.y + server.vy * dt); next.paddles[player.userId] = { ...server, x: predicted.x, y: predicted.y }; } } setFrame(next); } raf = requestAnimationFrame(draw); };
+    const draw = (now: number) => { const current = gameRef.current, snapshot = remoteSnapshotRef.current; if (current && snapshot) { const age = (now - snapshot.receivedAt) / 1000, next = cloneFrame(snapshot.frame); if (Date.now() >= next.pauseUntil && !next.winnerSide) next.puck = predictPuck(next.puck, age); for (const player of current.players) { const server = snapshot.frame.paddles[player.userId] ?? initialPaddle(player, current.mode); if (player.userId === user.id && localPaddleRef.current) next.paddles[player.userId] = { ...server, ...localPaddleRef.current }; else { const dt = Math.min(age, 0.18), predicted = clampPaddle(player.side, server.x + server.vx * dt, server.y + server.vy * dt); next.paddles[player.userId] = { ...server, x: predicted.x, y: predicted.y }; } } setFrame(next); } raf = requestAnimationFrame(draw); };
     raf = requestAnimationFrame(draw); return () => cancelAnimationFrame(raf);
   }, [game?.status, room.hostId, user.id]);
 
   const sendRemoteInput = useCallback((packet: InputPacket, force = false) => {
     if (room.hostId === user.id) return; const now = performance.now(), channel = peersRef.current.get(room.hostId)?.dc;
-    const directHealthy = channel?.readyState === "open" && now - lastDirectStateAtRef.current < 1200;
-    if (channel?.readyState === "open") { if (force || now - lastDirectInputSendRef.current >= 12) { lastDirectInputSendRef.current = now; try { channel.send(JSON.stringify({ type: "input", input: packet })); } catch {} } if (directHealthy) return; }
-    if (force || now - lastFallbackInputSendRef.current >= 100) { lastFallbackInputSendRef.current = now; void sendSignal(room.hostId, "input", packet).catch(() => undefined); }
+    const seq = ++inputSequenceRef.current;
+    const directHealthy = channel?.readyState === "open" && channel.bufferedAmount < 16384 && now - lastDirectStateAtRef.current < 2500;
+    if (channel?.readyState === "open" && channel.bufferedAmount < 16384) { if (force || now - lastDirectInputSendRef.current >= 12) { lastDirectInputSendRef.current = now; try { channel.send(JSON.stringify({ type: "input", seq, input: packet })); } catch {} } if (directHealthy) return; }
+    if (force || now - lastFallbackInputSendRef.current >= 70) { lastFallbackInputSendRef.current = now; void sendSignal(room.hostId, "input", { seq, input: packet }).catch(() => undefined); }
   }, [room.hostId, sendSignal, user.id]);
 
   useEffect(() => { if (!game || game.status !== "playing" || room.hostId === user.id) return; const id = window.setInterval(() => { if (!draggingRef.current || !localInputRef.current) return; const snapshot = remoteSnapshotRef.current?.frame; if (snapshot && Date.now() < snapshot.pauseUntil) return; sendRemoteInput(localInputRef.current, true); }, 28); return () => window.clearInterval(id); }, [game?.status, room.hostId, sendRemoteInput, user.id]);
