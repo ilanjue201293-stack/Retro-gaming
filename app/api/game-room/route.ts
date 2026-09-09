@@ -10,6 +10,7 @@ export const dynamic = "force-dynamic";
 
 type Mark = "X" | "O";
 type Board = string[];
+type BotDifficulty = "easy" | "normal" | "hard";
 
 async function body(req: NextRequest) {
   try { return await req.json(); } catch { return {}; }
@@ -26,6 +27,53 @@ function winner(board: Board): Mark | "draw" | null {
     if (value && value === board[b] && value === board[c]) return value as Mark;
   }
   return board.every(Boolean) ? "draw" : null;
+}
+
+function difficulty(value: unknown): BotDifficulty {
+  return value === "easy" || value === "hard" ? value : "normal";
+}
+
+function findWinningMove(board: Board, mark: Mark) {
+  for (let index = 0; index < 9; index++) {
+    if (board[index]) continue;
+    const next = [...board];
+    next[index] = mark;
+    if (winner(next) === mark) return index;
+  }
+  return null;
+}
+
+function randomChoice(values: number[]) {
+  return values[Math.floor(Math.random() * values.length)] ?? null;
+}
+
+function botMove(board: Board, level: BotDifficulty) {
+  const free = board.map((value, index) => value ? -1 : index).filter((index) => index >= 0);
+  if (!free.length) return null;
+
+  if (level === "easy") {
+    if (Math.random() < 0.2) {
+      const block = findWinningMove(board, "X");
+      if (block !== null) return block;
+    }
+    return randomChoice(free);
+  }
+
+  const winning = findWinningMove(board, "O");
+  if (winning !== null) return winning;
+  const block = findWinningMove(board, "X");
+  if (block !== null && (level === "hard" || Math.random() < 0.72)) return block;
+
+  if (level === "normal" && Math.random() < 0.32) return randomChoice(free);
+  if (!board[4]) return 4;
+  const oppositePairs: [number, number][] = [[0,8],[2,6]];
+  for (const [a,b] of oppositePairs) {
+    if (board[a] === "X" && !board[b]) return b;
+    if (board[b] === "X" && !board[a]) return a;
+  }
+  const corners = [0,2,6,8].filter((index) => !board[index]);
+  if (corners.length) return randomChoice(corners);
+  return randomChoice(free);
 }
 
 async function roomState(code: string, userId: string) {
@@ -59,28 +107,32 @@ async function ticTacToeState(code: string, userId: string) {
     board: Board;
     turn: Mark;
     winner: Mark | "draw" | null;
+    bot_o: boolean;
+    bot_difficulty: BotDifficulty;
   }>(
-    `select status,player_x_id,player_o_id,board,turn,winner
+    `select status,player_x_id,player_o_id,board,turn,winner,bot_o,bot_difficulty
      from retro_tictactoe_games where room_code=$1 limit 1`,
     [code]
   );
   const row = result.rows[0];
   if (!row) throw new Error("Morpion indisponible.");
-  const users = await db().query<{ id: string; username: string }>(
-    `select id,username from retro_users where id = any($1::text[])`,
-    [[row.player_x_id, row.player_o_id].filter(Boolean)]
-  );
+  const ids = [row.player_x_id, row.player_o_id].filter(Boolean) as string[];
+  const users = ids.length
+    ? await db().query<{ id: string; username: string }>(`select id,username from retro_users where id = any($1::text[])`, [ids])
+    : { rows: [] as { id: string; username: string }[] };
   const names = new Map(users.rows.map((item) => [item.id, item.username]));
   return {
     status: row.status,
     playerXId: row.player_x_id,
     playerOId: row.player_o_id,
     playerXName: row.player_x_id ? names.get(row.player_x_id) ?? "Joueur X" : null,
-    playerOName: row.player_o_id ? names.get(row.player_o_id) ?? "Joueur O" : null,
+    playerOName: row.bot_o ? "BOT" : row.player_o_id ? names.get(row.player_o_id) ?? "Joueur O" : null,
     board: Array.isArray(row.board) ? row.board : ["","","","","","","","",""],
     turn: row.turn,
     winner: row.winner,
     mySymbol: row.player_x_id === userId ? "X" : row.player_o_id === userId ? "O" : null,
+    botO: Boolean(row.bot_o),
+    botDifficulty: difficulty(row.bot_difficulty),
   };
 }
 
@@ -122,16 +174,20 @@ export async function POST(req: NextRequest) {
          limit 2`,
         [code, user.id]
       );
-      if (players.rows.length < 2) throw new Error("Il faut 2 joueurs en ligne.");
+      if (!players.rows.length) throw new Error("Aucun joueur disponible.");
+      const fillBots = Boolean(data.fillBots);
       const x = players.rows[0].user_id;
-      const o = players.rows[1].user_id;
+      const humanO = players.rows[1]?.user_id ?? null;
+      const botO = !humanO && fillBots;
+      if (!humanO && !botO) throw new Error("Il manque un joueur. Utilise « Compléter avec un bot ».");
+      const level = difficulty(data.botDifficulty);
       await db().query(
         `update retro_tictactoe_games
-         set status='playing',player_x_id=$1,player_o_id=$2,
+         set status='playing',player_x_id=$1,player_o_id=$2,bot_o=$3,bot_difficulty=$4,
              board='["","","","","","","","",""]'::jsonb,
              turn='X',winner=null,updated_at=now()
-         where room_code=$3`,
-        [x, o, code]
+         where room_code=$5`,
+        [x, humanO, botO, level, code]
       );
       return NextResponse.json({ ok: true, game: await ticTacToeState(code, user.id) });
     }
@@ -150,8 +206,9 @@ export async function POST(req: NextRequest) {
           player_o_id: string | null;
           board: Board;
           turn: Mark;
+          bot_o: boolean;
         }>(
-          `select status,player_x_id,player_o_id,board,turn
+          `select status,player_x_id,player_o_id,board,turn,bot_o
            from retro_tictactoe_games where room_code=$1 for update`,
           [code]
         );
@@ -159,6 +216,7 @@ export async function POST(req: NextRequest) {
         if (!row || row.status !== "playing") throw new Error("La partie n'est pas en cours.");
         const mark: Mark | null = row.player_x_id === user.id ? "X" : row.player_o_id === user.id ? "O" : null;
         if (!mark) throw new Error("Tu es spectateur de cette partie.");
+        if (row.bot_o && mark === "O") throw new Error("Cette place est occupée par le bot.");
         if (row.turn !== mark) throw new Error("Ce n'est pas ton tour.");
         const board = Array.isArray(row.board) ? [...row.board] : ["","","","","","","","",""];
         if (board[index]) throw new Error("Cette case est déjà prise.");
@@ -184,12 +242,53 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, game: await ticTacToeState(code, user.id) });
     }
 
+    if (action === "tttBotMove") {
+      if (membership.host_user_id !== user.id) throw new Error("Seul l'hôte synchronise le bot.");
+      const client = await db().connect();
+      try {
+        await client.query("begin");
+        const result = await client.query<{
+          status: string;
+          board: Board;
+          turn: Mark;
+          bot_o: boolean;
+          bot_difficulty: BotDifficulty;
+        }>(
+          `select status,board,turn,bot_o,bot_difficulty
+           from retro_tictactoe_games where room_code=$1 for update`,
+          [code]
+        );
+        const row = result.rows[0];
+        if (!row || row.status !== "playing" || !row.bot_o || row.turn !== "O") {
+          await client.query("rollback");
+          return NextResponse.json({ ok: true, game: await ticTacToeState(code, user.id) });
+        }
+        const board = Array.isArray(row.board) ? [...row.board] : ["","","","","","","","",""];
+        const index = botMove(board, difficulty(row.bot_difficulty));
+        if (index !== null) board[index] = "O";
+        const resultWinner = winner(board);
+        await client.query(
+          `update retro_tictactoe_games
+           set board=$1::jsonb,turn='X',winner=$2,status=$3,updated_at=now()
+           where room_code=$4`,
+          [JSON.stringify(board), resultWinner, resultWinner ? "gameover" : "playing", code]
+        );
+        await client.query("commit");
+      } catch (error) {
+        try { await client.query("rollback"); } catch {}
+        throw error;
+      } finally {
+        client.release();
+      }
+      return NextResponse.json({ ok: true, game: await ticTacToeState(code, user.id) });
+    }
+
     if (action === "tttReset") {
       if (membership.host_user_id !== user.id) throw new Error("Seul l'hôte peut relancer la partie.");
       await ensureTicTacToeRow(code);
       await db().query(
         `update retro_tictactoe_games
-         set status='lobby',player_x_id=null,player_o_id=null,
+         set status='lobby',player_x_id=null,player_o_id=null,bot_o=false,
              board='["","","","","","","","",""]'::jsonb,
              turn='X',winner=null,updated_at=now()
          where room_code=$1`,
