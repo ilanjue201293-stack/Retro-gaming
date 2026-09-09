@@ -367,6 +367,8 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
   const lastFallbackInputSendRef = useRef(0);
   const remoteSnapshotRef = useRef<{ frame: Frame; receivedAt: number } | null>(null);
   const reconnectingRef = useRef<Set<string>>(new Set());
+  const directAckRef = useRef<Map<string, number>>(new Map());
+  const lastDirectStateAtRef = useRef(0);
 
   useEffect(() => { gameRef.current = game; }, [game]);
   useEffect(() => {
@@ -446,9 +448,10 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
   const closePeer = useCallback((peerId: string) => {
     const entry = peersRef.current.get(peerId);
     if (entry) { try { entry.dc?.close(); } catch {} try { entry.pc.close(); } catch {} peersRef.current.delete(peerId); }
+    directAckRef.current.delete(peerId);
     reconnectingRef.current.delete(peerId);
   }, []);
-  const closeAllPeers = useCallback(() => { for (const peerId of [...peersRef.current.keys()]) closePeer(peerId); pendingIceRef.current.clear(); reconnectingRef.current.clear(); }, [closePeer]);
+  const closeAllPeers = useCallback(() => { for (const peerId of [...peersRef.current.keys()]) closePeer(peerId); pendingIceRef.current.clear(); directAckRef.current.clear(); lastDirectStateAtRef.current = 0; reconnectingRef.current.clear(); }, [closePeer]);
   const flushIce = useCallback(async (peerId: string, pc: RTCPeerConnection) => {
     if (!pc.remoteDescription) return;
     const queue = pendingIceRef.current.get(peerId) ?? []; pendingIceRef.current.set(peerId, []);
@@ -478,8 +481,22 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
 
   const attachDataChannel = useCallback((peerId: string, channel: RTCDataChannel, hostSide: boolean) => {
     const entry = peersRef.current.get(peerId); if (entry) entry.dc = channel; channel.binaryType = "arraybuffer";
-    channel.onopen = () => { reconnectingRef.current.delete(peerId); if (hostSide && simulationRef.current && channel.readyState === "open") { try { channel.send(JSON.stringify({ type: "state", state: simulationRef.current.frame })); } catch {} } };
-    channel.onmessage = (event) => { try { const message = JSON.parse(String(event.data)); if (hostSide && message.type === "input") receiveInput(peerId, message.input); else if (!hostSide && message.type === "state") receiveState(message.state); } catch {} };
+    channel.onopen = () => {
+      reconnectingRef.current.delete(peerId);
+      if (hostSide) directAckRef.current.set(peerId, performance.now()); else lastDirectStateAtRef.current = performance.now();
+      if (hostSide && simulationRef.current && channel.readyState === "open") { try { channel.send(JSON.stringify({ type: "state", state: simulationRef.current.frame })); } catch {} }
+    };
+    channel.onmessage = (event) => {
+      try {
+        const message = JSON.parse(String(event.data));
+        if (hostSide && message.type === "input") receiveInput(peerId, message.input);
+        else if (hostSide && message.type === "ack") directAckRef.current.set(peerId, performance.now());
+        else if (!hostSide && message.type === "state") {
+          lastDirectStateAtRef.current = performance.now(); receiveState(message.state);
+          if (channel.readyState === "open") { try { channel.send(JSON.stringify({ type: "ack" })); } catch {} }
+        }
+      } catch {}
+    };
     channel.onclose = () => closePeer(peerId); channel.onerror = () => undefined;
   }, [closePeer, receiveInput, receiveState]);
 
@@ -494,9 +511,9 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
 
   const startHostPeer = useCallback(async (peerId: string) => {
     if (peerId === user.id || reconnectingRef.current.has(peerId)) return;
-    const existing = peersRef.current.get(peerId); if (existing?.dc?.readyState === "open" || existing?.pc.connectionState === "connecting") return;
+    const existing = peersRef.current.get(peerId); const ackAge = performance.now() - (directAckRef.current.get(peerId) ?? 0); if (existing?.dc?.readyState === "open" && ackAge < 1600) return; if (existing?.pc.connectionState === "connecting") return;
     reconnectingRef.current.add(peerId);
-    try { if (existing) closePeer(peerId); const entry = makePeer(peerId, true); const channel = entry.pc.createDataChannel("retro-hockey"); entry.dc = channel; attachDataChannel(peerId, channel, true); const offer = await entry.pc.createOffer(); await entry.pc.setLocalDescription(offer); await sendSignal(peerId, "offer", offer); }
+    try { if (existing) closePeer(peerId); const entry = makePeer(peerId, true); const channel = entry.pc.createDataChannel("retro-hockey", { ordered: false, maxRetransmits: 0 }); entry.dc = channel; attachDataChannel(peerId, channel, true); const offer = await entry.pc.createOffer(); await entry.pc.setLocalDescription(offer); await sendSignal(peerId, "offer", offer); }
     catch { closePeer(peerId); } finally { window.setTimeout(() => reconnectingRef.current.delete(peerId), 600); }
   }, [attachDataChannel, closePeer, makePeer, sendSignal, user.id]);
 
@@ -519,13 +536,13 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
     let alive = true; let timer: number | undefined;
     const poll = async () => {
       if (!alive) return;
-      try { const current = gameRef.current; const data = await post({ action: "hockeyState", code: room.code }); if (alive) { const next = data.game as Game; gameRef.current = next; setGame(next); setError(""); } const delay = current?.status === "playing" ? 1200 : 320; if (alive) timer = window.setTimeout(() => void poll(), delay); }
+      try { const current = gameRef.current; const data = await post({ action: "hockeyState", code: room.code }); if (alive) { const next = data.game as Game; gameRef.current = next; setGame(next); setError(""); } const delay = current?.status === "playing" ? 2600 : 1100; if (alive) timer = window.setTimeout(() => void poll(), delay); }
       catch (pollError) {
         if (alive) {
           const current = gameRef.current;
           const message = pollError instanceof Error ? pollError.message : "Hockey indisponible.";
           if (!current || current.status === "lobby") setError(message);
-          timer = window.setTimeout(() => void poll(), current?.status === "playing" ? 2200 : 900);
+          timer = window.setTimeout(() => void poll(), current?.status === "playing" ? 3200 : 1600);
         }
       }
     };
@@ -559,9 +576,14 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
     const signalPoll = async () => {
       if (!alive) return;
       try { const data = await post({ action: "hockeySignalPoll", code: room.code, after: signalCursorRef.current }); if (!alive) return; signalCursorRef.current = Number(data.cursor ?? signalCursorRef.current); for (const signal of (data.signals ?? []) as Signal[]) await handleSignal(signal); } catch {}
-      const current = gameRef.current; let directReady = false;
-      if (current && current.status !== "lobby") { if (room.hostId === user.id) { const remotes = current.players.filter((player) => player.userId !== user.id && !player.isBot); directReady = remotes.length > 0 && remotes.every((player) => peersRef.current.get(player.userId)?.dc?.readyState === "open"); } else directReady = peersRef.current.get(room.hostId)?.dc?.readyState === "open"; }
-      timer = window.setTimeout(() => void signalPoll(), directReady ? 700 : 90);
+      const current = gameRef.current; let directReady = false; const now = performance.now();
+      if (current && current.status !== "lobby") {
+        if (room.hostId === user.id) {
+          const remotes = current.players.filter((player) => player.userId !== user.id && !player.isBot);
+          directReady = remotes.length > 0 && remotes.every((player) => peersRef.current.get(player.userId)?.dc?.readyState === "open" && now - (directAckRef.current.get(player.userId) ?? 0) < 1200);
+        } else directReady = peersRef.current.get(room.hostId)?.dc?.readyState === "open" && now - lastDirectStateAtRef.current < 1200;
+      }
+      timer = window.setTimeout(() => void signalPoll(), directReady ? 700 : 120);
     };
     void signalPoll(); return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };
   }, [game?.status, handleSignal, room.code, room.hostId, user.id]);
@@ -607,7 +629,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
         simulation.lastCheckpointLeft = simulation.frame.leftScore; simulation.lastCheckpointRight = simulation.frame.rightScore; resetLocalToStart(current); checkpoint(simulation.frame.leftScore, simulation.frame.rightScore, simulation.frame.winnerSide);
       }
       if (now - simulation.lastBroadcast >= 33) { simulation.lastBroadcast = now; const message = JSON.stringify({ type: "state", state: simulation.frame }); for (const player of current.players) { if (player.userId === user.id || player.isBot) continue; const channel = peersRef.current.get(player.userId)?.dc; if (channel?.readyState === "open") { try { channel.send(message); } catch {} } } }
-      if (now - simulation.lastFallbackBroadcast >= 170) { simulation.lastFallbackBroadcast = now; for (const player of current.players) { if (player.userId === user.id || player.isBot) continue; const channel = peersRef.current.get(player.userId)?.dc; if (channel?.readyState !== "open") void sendSignal(player.userId, "state", simulation.frame).catch(() => undefined); } }
+      if (now - simulation.lastFallbackBroadcast >= 150) { simulation.lastFallbackBroadcast = now; for (const player of current.players) { if (player.userId === user.id || player.isBot) continue; const channel = peersRef.current.get(player.userId)?.dc; const healthy = channel?.readyState === "open" && now - (directAckRef.current.get(player.userId) ?? 0) < 900; if (!healthy) void sendSignal(player.userId, "state", simulation.frame).catch(() => undefined); } }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick); return () => cancelAnimationFrame(raf);
@@ -621,8 +643,9 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
 
   const sendRemoteInput = useCallback((packet: InputPacket, force = false) => {
     if (room.hostId === user.id) return; const now = performance.now(), channel = peersRef.current.get(room.hostId)?.dc;
-    if (channel?.readyState === "open") { if (force || now - lastDirectInputSendRef.current >= 12) { lastDirectInputSendRef.current = now; try { channel.send(JSON.stringify({ type: "input", input: packet })); } catch {} } return; }
-    if (force || now - lastFallbackInputSendRef.current >= 85) { lastFallbackInputSendRef.current = now; void sendSignal(room.hostId, "input", packet).catch(() => undefined); }
+    const directHealthy = channel?.readyState === "open" && now - lastDirectStateAtRef.current < 1200;
+    if (channel?.readyState === "open") { if (force || now - lastDirectInputSendRef.current >= 12) { lastDirectInputSendRef.current = now; try { channel.send(JSON.stringify({ type: "input", input: packet })); } catch {} } if (directHealthy) return; }
+    if (force || now - lastFallbackInputSendRef.current >= 100) { lastFallbackInputSendRef.current = now; void sendSignal(room.hostId, "input", packet).catch(() => undefined); }
   }, [room.hostId, sendSignal, user.id]);
 
   useEffect(() => { if (!game || game.status !== "playing" || room.hostId === user.id) return; const id = window.setInterval(() => { if (!draggingRef.current || !localInputRef.current) return; const snapshot = remoteSnapshotRef.current?.frame; if (snapshot && Date.now() < snapshot.pauseUntil) return; sendRemoteInput(localInputRef.current, true); }, 28); return () => window.clearInterval(id); }, [game?.status, room.hostId, sendRemoteInput, user.id]);

@@ -217,7 +217,7 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
       } catch (pollError) {
         if (alive && !game) setError(pollError instanceof Error ? pollError.message : "Dunkshot indisponible.");
       }
-      if (alive) timer = window.setTimeout(() => void poll(), duelActive ? 280 : 900);
+      if (alive) timer = window.setTimeout(() => void poll(), duelActive ? 350 : 1400);
     };
     void poll();
     return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };

@@ -172,7 +172,7 @@ export default function PoolGame({ room, user }: { room: Room; user: User }) {
       if (!alive) return;
       try { const data = await post({ action: "state", code: room.code }); if (alive) { setGame(data.game as Game); setError(""); } }
       catch (pollError) { if (alive && !game) setError(pollError instanceof Error ? pollError.message : "Billard indisponible."); }
-      if (alive) timer = window.setTimeout(() => void poll(), duelActive ? 280 : 1000);
+      if (alive) timer = window.setTimeout(() => void poll(), duelActive ? 350 : 1400);
     };
     void poll(); return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };
   }, [room.code, duelActive]);

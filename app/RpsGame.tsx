@@ -93,7 +93,7 @@ export default function RpsGame({ room, user }: { room: Room; user: User }) {
       }
     };
     void poll();
-    const id = window.setInterval(poll, game?.status === "playing" ? 160 : 600);
+    const id = window.setInterval(poll, game?.status === "playing" ? 220 : 1100);
     return () => { alive = false; window.clearInterval(id); };
   }, [room.code, game?.status]);
 
