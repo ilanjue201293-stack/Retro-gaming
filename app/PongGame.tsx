@@ -48,6 +48,10 @@ type Simulation = {
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun.relay.metered.ca:80" },
+  { urls: "turn:global.relay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:global.relay.metered.ca:80?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turns:global.relay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
 ];
 const PADDLE_X_LEFT = 0.055;
 const PADDLE_X_RIGHT = 0.945;
@@ -67,7 +71,7 @@ const formatClock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(M
 
 async function post(payload: Record<string, unknown>) {
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 3500);
+  const timeout = window.setTimeout(() => controller.abort(), 8000);
   try {
     const response = await fetch("/api/pong", {
       method: "POST",
@@ -288,6 +292,11 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
   const remoteSnapshotRef = useRef<{ frame: Frame; receivedAt: number } | null>(null);
   const lastDirectInputRef = useRef(0);
   const lastFallbackInputRef = useRef(0);
+  const peerStartedAtRef = useRef<Map<string, number>>(new Map());
+  const stateSequenceRef = useRef(0);
+  const inputSequenceRef = useRef(0);
+  const lastRemoteStateSequenceRef = useRef(-1);
+  const lastRemoteInputSequenceRef = useRef<Map<string, number>>(new Map());
   const keysRef = useRef({ up: false, down: false });
 
   useEffect(() => { gameRef.current = game; }, [game]);
@@ -314,6 +323,7 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
       peersRef.current.delete(peerId);
     }
     directAckRef.current.delete(peerId);
+    peerStartedAtRef.current.delete(peerId);
     reconnectingRef.current.delete(peerId);
   }, []);
 
@@ -321,6 +331,7 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
     for (const peerId of [...peersRef.current.keys()]) closePeer(peerId);
     pendingIceRef.current.clear();
     directAckRef.current.clear();
+    peerStartedAtRef.current.clear();
     lastDirectStateAtRef.current = 0;
     reconnectingRef.current.clear();
   }, [closePeer]);
@@ -334,7 +345,13 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
     }
   }, []);
 
-  const receiveInput = useCallback((senderId: string, payload: unknown) => {
+  const receiveInput = useCallback((senderId: string, payload: unknown, sequenceValue?: unknown) => {
+    const sequence = Number(sequenceValue);
+    if (Number.isFinite(sequence)) {
+      const previous = lastRemoteInputSequenceRef.current.get(senderId) ?? -1;
+      if (sequence <= previous) return;
+      lastRemoteInputSequenceRef.current.set(senderId, sequence);
+    }
     const current = gameRef.current;
     const simulation = simulationRef.current;
     if (!current || !simulation || room.hostId !== user.id || !payload || typeof payload !== "object") return;
@@ -344,11 +361,17 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
     if (Number.isFinite(y)) simulation.targets[senderId] = clampPaddleY(y);
   }, [room.hostId, user.id]);
 
-  const receiveState = useCallback((payload: unknown) => {
+  const receiveState = useCallback((payload: unknown, sequenceValue?: unknown) => {
+    const sequence = Number(sequenceValue);
+    if (Number.isFinite(sequence)) {
+      if (sequence <= lastRemoteStateSequenceRef.current) return;
+      lastRemoteStateSequenceRef.current = sequence;
+    }
     if (!payload || typeof payload !== "object") return;
     const incoming = payload as Frame;
     if (!incoming.ball || !incoming.paddles) return;
     const copy = cloneFrame(incoming);
+    if (copy.pauseUntil > Date.now()) { localYRef.current = 0.5; draggingRef.current = false; }
     remoteSnapshotRef.current = { frame: copy, receivedAt: performance.now() };
     if (!isHost) setFrame(copy);
   }, [isHost]);
@@ -361,17 +384,17 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
       if (hostSide) directAckRef.current.set(peerId, performance.now());
       else lastDirectStateAtRef.current = performance.now();
       if (hostSide && simulationRef.current && channel.readyState === "open") {
-        try { channel.send(JSON.stringify({ type: "state", state: simulationRef.current.frame })); } catch {}
+        try { channel.send(JSON.stringify({ type: "state", seq: ++stateSequenceRef.current, state: simulationRef.current.frame })); } catch {}
       }
     };
     channel.onmessage = (event) => {
       try {
         const message = JSON.parse(String(event.data));
-        if (hostSide && message.type === "input") receiveInput(peerId, message.input);
+        if (hostSide && message.type === "input") receiveInput(peerId, message.input, message.seq);
         else if (hostSide && message.type === "ack") directAckRef.current.set(peerId, performance.now());
         else if (!hostSide && message.type === "state") {
           lastDirectStateAtRef.current = performance.now();
-          receiveState(message.state);
+          receiveState(message.state, message.seq);
           if (channel.readyState === "open") { try { channel.send(JSON.stringify({ type: "ack" })); } catch {} }
         }
       } catch {}
@@ -383,9 +406,10 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
     const old = peersRef.current.get(peerId);
     if (old && old.pc.connectionState !== "failed" && old.pc.connectionState !== "closed") return old;
     if (old) closePeer(peerId);
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS, iceCandidatePoolSize: 4 });
     const entry: PeerEntry = { pc, dc: null };
     peersRef.current.set(peerId, entry);
+    peerStartedAtRef.current.set(peerId, performance.now());
     pc.onicecandidate = (event) => {
       if (event.candidate) void sendSignal(peerId, "ice", event.candidate.toJSON()).catch(() => undefined);
     };
@@ -402,14 +426,16 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
   const startHostPeer = useCallback(async (peerId: string) => {
     if (peerId === user.id || reconnectingRef.current.has(peerId)) return;
     const old = peersRef.current.get(peerId);
-    const ackAge = performance.now() - (directAckRef.current.get(peerId) ?? 0);
-    if (old?.dc?.readyState === "open" && ackAge < 1600) return;
-    if (old?.pc.connectionState === "connecting") return;
+    const now = performance.now();
+    const ackAge = now - (directAckRef.current.get(peerId) ?? 0);
+    const connectingAge = now - (peerStartedAtRef.current.get(peerId) ?? 0);
+    if (old?.dc?.readyState === "open" && ackAge < 4500) return;
+    if ((old?.pc.connectionState === "connecting" || old?.pc.connectionState === "new") && connectingAge < 6500) return;
     reconnectingRef.current.add(peerId);
     try {
       if (old) closePeer(peerId);
       const entry = makePeer(peerId, true);
-      const channel = entry.pc.createDataChannel("retro-pong", { ordered: false, maxRetransmits: 0 });
+      const channel = entry.pc.createDataChannel("retro-pong", { ordered: false, maxPacketLifeTime: 240 });
       entry.dc = channel;
       attachDataChannel(peerId, channel, true);
       const offer = await entry.pc.createOffer();
@@ -424,11 +450,17 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
     if (!current || current.status === "lobby") return;
     const hostId = room.hostId;
     if (signal.kind === "input") {
-      if (user.id === hostId) receiveInput(signal.senderId, signal.payload);
+      if (user.id === hostId) {
+        const wrapped = signal.payload as { seq?: unknown; input?: unknown } | null;
+        receiveInput(signal.senderId, wrapped && typeof wrapped === "object" && "input" in wrapped ? wrapped.input : signal.payload, wrapped?.seq);
+      }
       return;
     }
     if (signal.kind === "state") {
-      if (user.id !== hostId && signal.senderId === hostId) receiveState(signal.payload);
+      if (user.id !== hostId && signal.senderId === hostId) {
+        const wrapped = signal.payload as { seq?: unknown; state?: unknown } | null;
+        receiveState(wrapped && typeof wrapped === "object" && "state" in wrapped ? wrapped.state : signal.payload, wrapped?.seq);
+      }
       return;
     }
     if (user.id === hostId) {
@@ -473,11 +505,11 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
         gameRef.current = next;
         setGame(next);
         setError("");
-        timer = window.setTimeout(() => void pollState(), next.status === "lobby" ? 1100 : 2600);
+        timer = window.setTimeout(() => void pollState(), next.status === "lobby" ? 800 : 6000);
       } catch (pollError) {
         if (!alive) return;
         setError(pollError instanceof Error ? pollError.message : "Pong indisponible.");
-        timer = window.setTimeout(() => void pollState(), 1600);
+        timer = window.setTimeout(() => void pollState(), gameRef.current?.status === "playing" ? 7000 : 1800);
       }
     };
     void pollState();
@@ -508,6 +540,10 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
     }
     signalCursorRef.current = 0;
     localYRef.current = 0.5;
+    stateSequenceRef.current = 0;
+    inputSequenceRef.current = 0;
+    lastRemoteStateSequenceRef.current = -1;
+    lastRemoteInputSequenceRef.current.clear();
     if (isHost) {
       const initial = makeFrame(game.players, game.leftScore, game.rightScore);
       simulationRef.current = {
@@ -541,9 +577,9 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
       const peerId = isHost ? (gameRef.current?.players.find((p) => p.userId !== user.id && !p.isBot)?.userId ?? "") : room.hostId;
       const peer = peersRef.current.get(peerId);
       const healthy = isHost
-        ? peer?.dc?.readyState === "open" && performance.now() - (directAckRef.current.get(peerId) ?? 0) < 1200
-        : peer?.dc?.readyState === "open" && performance.now() - lastDirectStateAtRef.current < 1200;
-      timer = window.setTimeout(() => void signalPoll(), healthy ? 700 : 120);
+        ? peer?.dc?.readyState === "open" && performance.now() - (directAckRef.current.get(peerId) ?? 0) < 2500
+        : peer?.dc?.readyState === "open" && performance.now() - lastDirectStateAtRef.current < 2500;
+      timer = window.setTimeout(() => void signalPoll(), healthy ? 850 : 70);
     };
     void signalPoll();
     return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };
@@ -556,7 +592,7 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
       if (other) void startHostPeer(other.userId);
     };
     ensure();
-    const id = window.setInterval(ensure, 900);
+    const id = window.setInterval(ensure, 1500);
     return () => window.clearInterval(id);
   }, [game?.status, isHost, startHostPeer, user.id]);
 
@@ -603,20 +639,22 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
 
       if (now - simulation.lastBroadcast >= 33) {
         simulation.lastBroadcast = now;
-        const message = JSON.stringify({ type: "state", state: simulation.frame });
+        const seq = ++stateSequenceRef.current;
+        const message = JSON.stringify({ type: "state", seq, state: simulation.frame });
         for (const player of current.players) {
           if (player.userId === user.id || player.isBot) continue;
           const channel = peersRef.current.get(player.userId)?.dc;
-          if (channel?.readyState === "open") { try { channel.send(message); } catch {} }
+          if (channel?.readyState === "open" && channel.bufferedAmount < 32768) { try { channel.send(message); } catch {} }
         }
       }
-      if (now - simulation.lastFallbackBroadcast >= 150) {
+      if (now - simulation.lastFallbackBroadcast >= 85) {
         simulation.lastFallbackBroadcast = now;
+        const seq = ++stateSequenceRef.current;
         for (const player of current.players) {
           if (player.userId === user.id || player.isBot) continue;
           const channel = peersRef.current.get(player.userId)?.dc;
-          const healthy = channel?.readyState === "open" && now - (directAckRef.current.get(player.userId) ?? 0) < 900;
-          if (!healthy) void sendSignal(player.userId, "state", simulation.frame).catch(() => undefined);
+          const healthy = channel?.readyState === "open" && channel.bufferedAmount < 65536 && now - (directAckRef.current.get(player.userId) ?? 0) < 1800;
+          if (!healthy) void sendSignal(player.userId, "state", { seq, state: simulation.frame }).catch(() => undefined);
         }
       }
       raf = requestAnimationFrame(tick);
@@ -648,17 +686,19 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
     if (isHost) return;
     const now = performance.now();
     const channel = peersRef.current.get(room.hostId)?.dc;
-    const directHealthy = channel?.readyState === "open" && now - lastDirectStateAtRef.current < 1200;
+    const directHealthy = channel?.readyState === "open" && now - lastDirectStateAtRef.current < 2500;
     if (channel?.readyState === "open") {
       if (force || now - lastDirectInputRef.current >= 12) {
         lastDirectInputRef.current = now;
-        try { channel.send(JSON.stringify({ type: "input", input: { y: localYRef.current } })); } catch {}
+        const seq = ++inputSequenceRef.current;
+        try { channel.send(JSON.stringify({ type: "input", seq, input: { y: localYRef.current } })); } catch {}
       }
       if (directHealthy) return;
     }
-    if (force || now - lastFallbackInputRef.current >= 100) {
+    if (force || now - lastFallbackInputRef.current >= 70) {
       lastFallbackInputRef.current = now;
-      void sendSignal(room.hostId, "input", { y: localYRef.current }).catch(() => undefined);
+      const seq = ++inputSequenceRef.current;
+      void sendSignal(room.hostId, "input", { seq, input: { y: localYRef.current } }).catch(() => undefined);
     }
   }, [isHost, room.hostId, sendSignal]);
 
@@ -780,7 +820,7 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
       </div>
       <div className="pongReady">
         <span>{online}/2 joueurs connectés</span>
-        {isHost ? <button className="primaryButton" disabled={busy || online !== 2} onClick={() => void start(false)}>{busy ? "Lancement…" : "Lancer Pong"}</button> : <small>En attente de l'hôte…</small>}
+        {isHost ? <><button className="primaryButton pongHostStartButton" disabled={busy || online !== 2} onClick={() => void start(false)}>{busy ? "Démarrage…" : "Démarrer la partie"}</button><small>{online === 2 ? "C'est toi qui décides quand le match commence." : "Il faut exactement 2 joueurs connectés."}</small></> : <small>En attente que l'hôte démarre la partie…</small>}
       </div>
       {isHost && online === 1 && <div className="botPlayPanel"><div><strong>🤖 Jouer contre un bot</strong><small>Pas besoin d'attendre un ami.</small></div><select value={botDifficulty} onChange={(event) => setBotDifficulty(event.target.value as BotDifficulty)}><option value="easy">Facile</option><option value="normal">Normal</option><option value="hard">Difficile</option></select><button disabled={busy} onClick={() => void start(true)}>Lancer vs BOT</button></div>}
       {error && <div className="errorBox">{error}</div>}
