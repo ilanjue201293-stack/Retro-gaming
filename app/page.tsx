@@ -1,2 +1,9 @@
 import RetroApp from "./RetroApp";
-export default function Home() { return <RetroApp />; }
+import RoomGameController from "./RoomGameController";
+
+export default function Home() {
+  return <>
+    <RetroApp />
+    <RoomGameController />
+  </>;
+}
