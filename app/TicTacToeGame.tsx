@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 type RoomMember = { id: string; username: string; online: boolean; joined_at: string };
 type RoomState = { code: string; hostId: string; currentGame: string; members: RoomMember[]; userId: string };
 type Mark = "X" | "O";
+type BotDifficulty = "easy" | "normal" | "hard";
 type Game = {
   status: "lobby" | "playing" | "gameover";
   playerXId: string | null;
@@ -15,7 +16,11 @@ type Game = {
   turn: Mark;
   winner: Mark | "draw" | null;
   mySymbol: Mark | null;
+  botO: boolean;
+  botDifficulty: BotDifficulty;
 };
+
+const DIFFICULTY_LABEL: Record<BotDifficulty, string> = { easy: "Facile", normal: "Normal", hard: "Difficile" };
 
 async function post(payload: Record<string, unknown>) {
   const response = await fetch("/api/game-room", {
@@ -33,6 +38,7 @@ export default function TicTacToeGame({ room }: { room: RoomState }) {
   const [game, setGame] = useState<Game | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [botDifficulty, setBotDifficulty] = useState<BotDifficulty>("normal");
 
   const refresh = useCallback(async () => {
     try {
@@ -70,15 +76,30 @@ export default function TicTacToeGame({ room }: { room: RoomState }) {
   const isHost = room.hostId === room.userId;
   const onlineCount = room.members.filter((member) => member.online).length;
   const myTurn = game?.status === "playing" && game.mySymbol === game.turn;
+  const boardKey = game?.board.join("") ?? "";
+
+  useEffect(() => {
+    if (!isHost || !game?.botO || game.status !== "playing" || game.turn !== "O") return;
+    const timer = window.setTimeout(async () => {
+      try {
+        const data = await post({ action: "tttBotMove", code: room.code });
+        setGame(data.game as Game);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Le bot n'a pas pu jouer.");
+      }
+    }, game.botDifficulty === "hard" ? 420 : game.botDifficulty === "easy" ? 720 : 560);
+    return () => window.clearTimeout(timer);
+  }, [boardKey, game?.botDifficulty, game?.botO, game?.status, game?.turn, isHost, room.code]);
 
   const statusText = useMemo(() => {
     if (!game) return "Chargement…";
-    if (game.status === "lobby") return onlineCount >= 2 ? "Prêt à jouer" : "En attente d'un deuxième joueur";
+    if (game.status === "lobby") return onlineCount >= 2 ? "Prêt à jouer" : "1 place à compléter";
     if (game.status === "gameover") {
       if (game.winner === "draw") return "Match nul";
       const name = game.winner === "X" ? game.playerXName : game.playerOName;
       return `${name ?? game.winner} gagne !`;
     }
+    if (game.botO && game.turn === "O") return "Le bot réfléchit…";
     if (!game.mySymbol) return `Tour de ${game.turn === "X" ? game.playerXName ?? "X" : game.playerOName ?? "O"}`;
     return myTurn ? "À toi de jouer" : "Tour de ton adversaire";
   }, [game, myTurn, onlineCount]);
@@ -127,7 +148,7 @@ export default function TicTacToeGame({ room }: { room: RoomState }) {
       </div>
       <div className="tttVs">VS</div>
       <div className={`tttPlayer ${game.turn === "O" && game.status === "playing" ? "turn" : ""}`}>
-        <b className="o">O</b><span><strong>{game.playerOName ?? "Joueur O"}</strong><small>{game.mySymbol === "O" ? "Toi" : ""}</small></span>
+        <b className="o">O</b><span><strong>{game.playerOName ?? "Place libre"}</strong><small>{game.botO ? `Bot · ${DIFFICULTY_LABEL[game.botDifficulty]}` : game.mySymbol === "O" ? "Toi" : ""}</small></span>
       </div>
     </div>
 
@@ -143,7 +164,7 @@ export default function TicTacToeGame({ room }: { room: RoomState }) {
 
     <div className="tttFooter">
       {game.status === "lobby" && <>
-        <div className="tttOnline"><i className={onlineCount >= 2 ? "ready" : ""}/><span>{onlineCount} joueur{onlineCount > 1 ? "s" : ""} en ligne</span></div>
+        <div className="tttOnline"><i className={onlineCount >= 2 ? "ready" : ""}/><span>{onlineCount}/2 place{onlineCount > 1 ? "s" : ""} humaine{onlineCount > 1 ? "s" : ""} remplie{onlineCount > 1 ? "s" : ""}</span></div>
         {isHost
           ? <button className="primaryButton" disabled={busy || onlineCount < 2} onClick={() => void action("tttStart")}>{busy ? "Lancement…" : "Lancer la partie"}</button>
           : <small>En attente de l'hôte…</small>}
@@ -153,6 +174,15 @@ export default function TicTacToeGame({ room }: { room: RoomState }) {
         ? <button className="primaryButton" disabled={busy} onClick={() => void action("tttReset")}>Nouvelle partie</button>
         : <small>En attente de l'hôte pour rejouer…</small>)}
     </div>
+
+    {game.status === "lobby" && isHost && onlineCount === 1 && <div className="botPlayPanel tttBotPanel">
+      <div><strong>🤖 Compléter avec un bot</strong><small>Le bot prend simplement la deuxième place manquante.</small></div>
+      <select value={botDifficulty} onChange={(event) => setBotDifficulty(event.target.value as BotDifficulty)}>
+        <option value="easy">Facile</option><option value="normal">Normal</option><option value="hard">Difficile</option>
+      </select>
+      <button disabled={busy} onClick={() => void action("tttStart", { fillBots: true, botDifficulty })}>{busy ? "Lancement…" : "Compléter et lancer"}</button>
+    </div>}
+
     {error && <div className="errorBox tttError">{error}<button onClick={() => void refresh()}>↻</button></div>}
   </section>;
 }
