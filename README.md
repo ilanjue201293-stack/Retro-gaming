@@ -8,6 +8,7 @@ Portail privé de mini-jeux entre amis avec rooms persistantes, chat et vocal de
 - Pong : 1v1 humain ou bot, score et temps personnalisables
 - Pierre · Feuille · Ciseaux : 1v1 humain ou bot, nombre de manches configurable
 - Dunkshot : solo ou 1v1 tour par tour, tir à la puissance et à l'angle, vies configurables, panier mobile et difficulté progressive
+- Billard : solo ou 1v1 8-ball arcade, collisions, bandes, poches et groupes pleines/rayées
 
 ## Inclus
 

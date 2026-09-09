@@ -6,6 +6,7 @@ import HockeyGame from "./HockeyGame";
 import PongGame from "./PongGame";
 import RpsGame from "./RpsGame";
 import DunkshotGame from "./DunkshotGame";
+import PoolGame from "./PoolGame";
 
 type User = { id: string; username: string };
 type Friend = { id: string; username: string; online: boolean };
@@ -272,6 +273,7 @@ export default function RetroApp() {
             <PongGame room={room} user={user}/>
             <RpsGame room={room} user={user}/>
             <DunkshotGame room={room} user={user}/>
+            <PoolGame room={room} user={user}/>
           </section>
           <aside className="roomSide">
             <section className="panel">
@@ -326,6 +328,11 @@ export default function RetroApp() {
           <div className="gameLibraryCard">
             <div className="gameLibraryIcon dunkMiniIcon">🏀</div>
             <div><small>ARCADE · SOLO / 1V1</small><h3>Dunkshot</h3><p>Charge ton tir en tirant vers le bas, vise avec l'angle et enchaîne les paniers. Le panier devient mobile quand ta série monte.</p></div>
+            <button className="primaryButton" disabled={roomBusy} onClick={() => void createRoom()}>Créer une room</button>
+          </div>
+          <div className="gameLibraryCard">
+            <div className="gameLibraryIcon poolMiniIcon">🎱</div>
+            <div><small>BILLARD · SOLO / 1V1</small><h3>Billard</h3><p>Vraie table 8-ball arcade : collisions, bandes, poches, puissance et duel pleines contre rayées.</p></div>
             <button className="primaryButton" disabled={roomBusy} onClick={() => void createRoom()}>Créer une room</button>
           </div>
         </section>
