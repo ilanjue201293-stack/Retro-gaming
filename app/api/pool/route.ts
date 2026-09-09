@@ -6,7 +6,8 @@ import { cleanRoomCode, makeId, sha256 } from "@/lib/utils";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type Player = { userId: string; username: string };
+type BotDifficulty = "easy" | "normal" | "hard";
+type Player = { userId: string; username: string; isBot?: boolean; difficulty?: BotDifficulty };
 type Group = "solids" | "stripes" | null;
 type Ball = { id: number; x: number; y: number; vx: number; vy: number; pocketed: boolean };
 type Shot = { id: string; shooterId: string; angle: number; power: number; startedAt: number };
@@ -66,6 +67,34 @@ function ballGroup(id: number): Exclude<Group, null> | null {
   if (id >= 1 && id <= 7) return "solids";
   if (id >= 9 && id <= 15) return "stripes";
   return null;
+}
+
+function chooseBotShot(balls: Ball[], group: Group, difficulty: BotDifficulty) {
+  const cue = balls.find((ball) => ball.id === 0 && !ball.pocketed);
+  if (!cue) return { angle: 0, power: 0.55 };
+  let targets = balls.filter((ball) => !ball.pocketed && ball.id !== 0 && ball.id !== 8 && (!group || ballGroup(ball.id) === group));
+  if (!targets.length) targets = balls.filter((ball) => !ball.pocketed && ball.id === 8);
+  if (!targets.length) return { angle: 0, power: 0.55 };
+  const choices: { angle: number; power: number; score: number }[] = [];
+  for (const target of targets) {
+    for (const pocket of POCKETS) {
+      const tx = pocket.x - target.x, ty = pocket.y - target.y, targetDistance = Math.hypot(tx, ty);
+      if (targetDistance < 0.001) continue;
+      const ux = tx / targetDistance, uy = ty / targetDistance;
+      const ghostX = target.x - ux * BALL_R * 2.08, ghostY = target.y - uy * BALL_R * 2.08;
+      if (ghostX < LEFT || ghostX > RIGHT || ghostY < TOP || ghostY > BOTTOM) continue;
+      const cueDistance = Math.hypot(ghostX - cue.x, ghostY - cue.y);
+      const angle = Math.atan2(ghostY - cue.y, ghostX - cue.x);
+      const power = clamp(0.4 + cueDistance * 0.42 + targetDistance * 0.46, 0.42, 0.92);
+      choices.push({ angle, power, score: targetDistance + cueDistance * 0.42 });
+    }
+  }
+  choices.sort((a, b) => a.score - b.score);
+  const take = difficulty === "easy" ? Math.min(10, choices.length) : difficulty === "hard" ? Math.min(2, choices.length) : Math.min(5, choices.length);
+  const selected = choices[Math.floor(Math.random() * Math.max(1, take))] ?? { angle: Math.atan2(targets[0].y - cue.y, targets[0].x - cue.x), power: 0.62, score: 0 };
+  const error = difficulty === "easy" ? 0.11 : difficulty === "hard" ? 0.018 : 0.05;
+  const powerNoise = difficulty === "easy" ? 0.12 : difficulty === "hard" ? 0.025 : 0.06;
+  return { angle: selected.angle + (Math.random() * 2 - 1) * error, power: clamp(selected.power + (Math.random() * 2 - 1) * powerNoise, 0.32, 0.96) };
 }
 
 function respawnCue(balls: Ball[]) {
@@ -178,20 +207,7 @@ async function resetOtherGames(code: string) {
   await db().query(`update retro_dunkshot_games set status='lobby',players='[]'::jsonb,lives='{}'::jsonb,turn_index=0,streak=0,shot=null,last_result=null,winner_id=null,started_at=null,ends_at=null,updated_at=now() where room_code=$1`, [code]).catch(() => undefined);
 }
 async function state(code: string) {
-  const current = await row(code);
-  if (current.status !== "lobby") {
-    const statuses = await Promise.all([
-      db().query<{ status: string }>(`select status from retro_hockey_games where room_code=$1 limit 1`, [code]).catch(() => ({ rows: [] as { status: string }[] })),
-      db().query<{ status: string }>(`select status from retro_pong_games where room_code=$1 limit 1`, [code]).catch(() => ({ rows: [] as { status: string }[] })),
-      db().query<{ status: string }>(`select status from retro_rps_games where room_code=$1 limit 1`, [code]).catch(() => ({ rows: [] as { status: string }[] })),
-      db().query<{ status: string }>(`select status from retro_dunkshot_games where room_code=$1 limit 1`, [code]).catch(() => ({ rows: [] as { status: string }[] })),
-    ]);
-    if (statuses.some((result) => result.rows[0]?.status && result.rows[0].status !== "lobby")) {
-      await db().query(`update retro_pool_games set status='lobby',players='[]'::jsonb,turn_index=0,balls=$1::jsonb,groups='{}'::jsonb,shot=null,winner_id=null,last_message=null,updated_at=now() where room_code=$2`, [JSON.stringify(rackBalls()), code]);
-      return output(await row(code));
-    }
-  }
-  return output(current);
+  return output(await row(code));
 }
 
 export async function POST(req: NextRequest) {
@@ -202,11 +218,13 @@ export async function POST(req: NextRequest) {
     if (action === "start") {
       if (await hostId(code) !== user.id) throw new Error("Seul l'hôte peut lancer le billard.");
       const opponentId = String(data.opponentId ?? "");
+      const requestedBot = String(data.botDifficulty ?? "");
+      const botDifficulty: BotDifficulty | null = requestedBot === "easy" || requestedBot === "normal" || requestedBot === "hard" ? requestedBot : null;
       const members = await db().query<{ id: string; username: string }>(`select u.id,u.username from retro_room_members m join retro_users u on u.id=m.user_id where m.room_code=$1 and m.last_seen>now()-interval '15 seconds' order by m.joined_at`, [code]);
       const host = members.rows.find((member) => member.id === user.id);
       const opponent = members.rows.find((member) => member.id === opponentId && member.id !== user.id) ?? members.rows.find((member) => member.id !== user.id);
-      if (!host || !opponent) throw new Error("Il faut 2 joueurs connectés pour jouer.");
-      const players: Player[] = [{ userId: host.id, username: host.username }, { userId: opponent.id, username: opponent.username }];
+      if (!host || (!botDifficulty && !opponent)) throw new Error("Il faut 2 joueurs connectés ou choisir un bot.");
+      const players: Player[] = [{ userId: host.id, username: host.username }, botDifficulty ? { userId: "bot:pool", username: "BOT", isBot: true, difficulty: botDifficulty } : { userId: opponent!.id, username: opponent!.username }];
       await resetOtherGames(code);
       await db().query(`update retro_pool_games set status='playing',players=$1::jsonb,turn_index=0,balls=$2::jsonb,groups='{}'::jsonb,shot=null,winner_id=null,last_message='Casse la table.',updated_at=now() where room_code=$3`, [JSON.stringify(players), JSON.stringify(rackBalls()), code]);
       return NextResponse.json({ ok: true, game: await state(code) });
@@ -223,10 +241,34 @@ export async function POST(req: NextRequest) {
         if (parseShot(current.shot)) throw new Error("Les billes roulent déjà.");
         const power = clamp(Number(data.power) || 0, 0, 1); if (power < 0.05) throw new Error("Coup trop faible.");
         const angle = Number(data.angle) || 0;
-        const shot: Shot = { id: makeId(), shooterId: user.id, angle, power, startedAt: Date.now() + 240 };
+        const requestedShotId = String(data.shotId ?? "");
+        const shotId = /^[A-Za-z0-9:_-]{8,120}$/.test(requestedShotId) ? requestedShotId : makeId();
+        const now = Date.now();
+        const requestedStartedAt = Number(data.startedAt);
+        const startedAt = Number.isFinite(requestedStartedAt) && requestedStartedAt >= now - 1500 && requestedStartedAt <= now + 300 ? requestedStartedAt : now + 20;
+        const shot: Shot = { id: shotId, shooterId: user.id, angle, power, startedAt };
         await client.query(`update retro_pool_games set shot=$1::jsonb,last_message=null,updated_at=now() where room_code=$2`, [JSON.stringify(shot), code]);
         await client.query("commit"); return NextResponse.json({ ok: true, game: await state(code) });
       } catch (error) { await client.query("rollback"); throw error; } finally { client.release(); }
+    }
+
+    if (action === "botShoot") {
+      if (await hostId(code) !== user.id) throw new Error("Seul l'hôte peut faire jouer le bot.");
+      const client = await db().connect();
+      try {
+        await client.query("begin");
+        const result = await client.query<Row>(`select room_code,status,players,turn_index,balls,groups,shot,winner_id,last_message from retro_pool_games where room_code=$1 for update`, [code]);
+        const current = result.rows[0]; if (!current || current.status !== "playing") throw new Error("La partie n'est pas en cours.");
+        if (parseShot(current.shot)) { await client.query("rollback"); return NextResponse.json({ ok: true, game: await state(code) }); }
+        const players = parsePlayers(current.players);
+        const bot = players[Math.max(0, current.turn_index) % Math.max(1, players.length)];
+        if (!bot?.isBot) throw new Error("Ce n'est pas au bot de jouer.");
+        const groups = parseGroups(current.groups);
+        const choice = chooseBotShot(parseBalls(current.balls), groups[bot.userId] ?? null, bot.difficulty ?? "normal");
+        const shot: Shot = { id: makeId(), shooterId: bot.userId, angle: choice.angle, power: choice.power, startedAt: Date.now() + 40 };
+        await client.query(`update retro_pool_games set shot=$1::jsonb,last_message=$2,updated_at=now() where room_code=$3`, [JSON.stringify(shot), `${bot.username} prépare son tir…`, code]);
+        await client.query("commit"); return NextResponse.json({ ok: true, game: await state(code) });
+      } catch (error) { try { await client.query("rollback"); } catch {} throw error; } finally { client.release(); }
     }
 
     if (action === "resolve") {
@@ -238,9 +280,10 @@ export async function POST(req: NextRequest) {
         if (!current || current.status !== "playing") { await client.query("rollback"); return NextResponse.json({ ok: true, game: await state(code) }); }
         const shot = parseShot(current.shot); const shotId = String(data.shotId ?? "");
         if (!shot || shot.id !== shotId) { await client.query("rollback"); return NextResponse.json({ ok: true, game: await state(code) }); }
-        if (shot.shooterId !== user.id) throw new Error("Seul le tireur peut valider le coup.");
         const players = parsePlayers(current.players); const shooterIndex = Math.max(0, current.turn_index) % Math.max(1, players.length); const shooter = players[shooterIndex]; const opponent = players[(shooterIndex + 1) % players.length];
-        if (!shooter || !opponent) throw new Error("Joueurs invalides.");
+        if (!shooter || !opponent || shooter.userId !== shot.shooterId) throw new Error("Joueurs invalides.");
+        const resolvingBotAsHost = Boolean(shooter.isBot && await hostId(code) === user.id);
+        if (shot.shooterId !== user.id && !resolvingBotAsHost) throw new Error("Seul le tireur peut valider le coup.");
         const before = parseBalls(current.balls); const simulationResult = simulateShot(before, shot); const simulated = simulationResult.balls;
         const previouslyPocketed = new Set(before.filter((ball) => ball.pocketed).map((ball) => ball.id));
         const pocketed = simulationResult.pocketOrder.filter((id) => !previouslyPocketed.has(id));

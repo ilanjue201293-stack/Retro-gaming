@@ -44,6 +44,10 @@ type Simulation = {
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun.relay.metered.ca:80" },
+  { urls: "turn:global.relay.metered.ca:80", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:global.relay.metered.ca:80?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turns:global.relay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
 ];
 const PUCK_R = 0.024;
 const MALLET_R = 0.048;
@@ -73,7 +77,7 @@ function teamCaps(mode: Mode, twoPlayerSide: Side) {
 
 async function post(payload: Record<string, unknown>) {
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 3500);
+  const timeout = window.setTimeout(() => controller.abort(), 8000);
   try {
     const response = await fetch("/api/rooms", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), cache: "no-store", signal: controller.signal });
     const data = await response.json();
@@ -369,6 +373,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
   const reconnectingRef = useRef<Set<string>>(new Set());
   const directAckRef = useRef<Map<string, number>>(new Map());
   const lastDirectStateAtRef = useRef(0);
+  const peerStartedAtRef = useRef<Map<string, number>>(new Map());
 
   useEffect(() => { gameRef.current = game; }, [game]);
   useEffect(() => {
@@ -431,6 +436,11 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
     if (game?.status === "lobby") setFocusSuppressed(false);
   }, [game?.status]);
   useEffect(() => {
+    if (!game) return;
+    const active = game.status === "playing" || game.status === "gameover";
+    window.dispatchEvent(new CustomEvent("retro:game-active", { detail: active ? "hockey" : null }));
+  }, [game?.status]);
+  useEffect(() => {
     const returnToRoom = () => setFocusSuppressed(true);
     window.addEventListener("retro:return-room", returnToRoom);
     return () => window.removeEventListener("retro:return-room", returnToRoom);
@@ -449,9 +459,10 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
     const entry = peersRef.current.get(peerId);
     if (entry) { try { entry.dc?.close(); } catch {} try { entry.pc.close(); } catch {} peersRef.current.delete(peerId); }
     directAckRef.current.delete(peerId);
+    peerStartedAtRef.current.delete(peerId);
     reconnectingRef.current.delete(peerId);
   }, []);
-  const closeAllPeers = useCallback(() => { for (const peerId of [...peersRef.current.keys()]) closePeer(peerId); pendingIceRef.current.clear(); directAckRef.current.clear(); lastDirectStateAtRef.current = 0; reconnectingRef.current.clear(); }, [closePeer]);
+  const closeAllPeers = useCallback(() => { for (const peerId of [...peersRef.current.keys()]) closePeer(peerId); pendingIceRef.current.clear(); directAckRef.current.clear(); peerStartedAtRef.current.clear(); lastDirectStateAtRef.current = 0; reconnectingRef.current.clear(); }, [closePeer]);
   const flushIce = useCallback(async (peerId: string, pc: RTCPeerConnection) => {
     if (!pc.remoteDescription) return;
     const queue = pendingIceRef.current.get(peerId) ?? []; pendingIceRef.current.set(peerId, []);
@@ -502,7 +513,7 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
 
   const makePeer = useCallback((peerId: string, hostSide: boolean) => {
     const old = peersRef.current.get(peerId); if (old && old.pc.connectionState !== "failed" && old.pc.connectionState !== "closed") return old; if (old) closePeer(peerId);
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS }); const entry: PeerEntry = { pc, dc: null }; peersRef.current.set(peerId, entry);
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS, iceCandidatePoolSize: 4 }); const entry: PeerEntry = { pc, dc: null }; peersRef.current.set(peerId, entry); peerStartedAtRef.current.set(peerId, performance.now());
     pc.onicecandidate = (event) => { if (event.candidate) void sendSignal(peerId, "ice", event.candidate.toJSON()).catch(() => undefined); };
     pc.onconnectionstatechange = () => { if (pc.connectionState === "failed" || pc.connectionState === "closed") closePeer(peerId); if (pc.connectionState === "disconnected") window.setTimeout(() => { if (pc.connectionState === "disconnected") closePeer(peerId); }, 900); };
     if (!hostSide) pc.ondatachannel = (event) => attachDataChannel(peerId, event.channel, false);
@@ -511,9 +522,9 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
 
   const startHostPeer = useCallback(async (peerId: string) => {
     if (peerId === user.id || reconnectingRef.current.has(peerId)) return;
-    const existing = peersRef.current.get(peerId); const ackAge = performance.now() - (directAckRef.current.get(peerId) ?? 0); if (existing?.dc?.readyState === "open" && ackAge < 1600) return; if (existing?.pc.connectionState === "connecting") return;
+    const existing = peersRef.current.get(peerId); const now = performance.now(); const ackAge = now - (directAckRef.current.get(peerId) ?? 0); const connectingAge = now - (peerStartedAtRef.current.get(peerId) ?? 0); if (existing?.dc?.readyState === "open" && ackAge < 1800) return; if (existing?.pc.connectionState === "connecting" && connectingAge < 3500) return;
     reconnectingRef.current.add(peerId);
-    try { if (existing) closePeer(peerId); const entry = makePeer(peerId, true); const channel = entry.pc.createDataChannel("retro-hockey", { ordered: false, maxRetransmits: 0 }); entry.dc = channel; attachDataChannel(peerId, channel, true); const offer = await entry.pc.createOffer(); await entry.pc.setLocalDescription(offer); await sendSignal(peerId, "offer", offer); }
+    try { if (existing) closePeer(peerId); const entry = makePeer(peerId, true); const channel = entry.pc.createDataChannel("retro-hockey", { ordered: false, maxPacketLifeTime: 180 }); entry.dc = channel; attachDataChannel(peerId, channel, true); const offer = await entry.pc.createOffer(); await entry.pc.setLocalDescription(offer); await sendSignal(peerId, "offer", offer); }
     catch { closePeer(peerId); } finally { window.setTimeout(() => reconnectingRef.current.delete(peerId), 600); }
   }, [attachDataChannel, closePeer, makePeer, sendSignal, user.id]);
 
@@ -536,13 +547,13 @@ export default function HockeyGame({ room, user }: { room: Room; user: User; onA
     let alive = true; let timer: number | undefined;
     const poll = async () => {
       if (!alive) return;
-      try { const current = gameRef.current; const data = await post({ action: "hockeyState", code: room.code }); if (alive) { const next = data.game as Game; gameRef.current = next; setGame(next); setError(""); } const delay = current?.status === "playing" ? 2600 : 1100; if (alive) timer = window.setTimeout(() => void poll(), delay); }
+      try { const current = gameRef.current; const data = await post({ action: "hockeyState", code: room.code }); if (alive) { const next = data.game as Game; gameRef.current = next; setGame(next); setError(""); } const delay = current?.status === "playing" ? 6000 : 1800; if (alive) timer = window.setTimeout(() => void poll(), delay); }
       catch (pollError) {
         if (alive) {
           const current = gameRef.current;
           const message = pollError instanceof Error ? pollError.message : "Hockey indisponible.";
           if (!current || current.status === "lobby") setError(message);
-          timer = window.setTimeout(() => void poll(), current?.status === "playing" ? 3200 : 1600);
+          timer = window.setTimeout(() => void poll(), current?.status === "playing" ? 7000 : 2200);
         }
       }
     };

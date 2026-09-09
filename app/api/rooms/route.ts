@@ -116,6 +116,7 @@ export async function POST(req: NextRequest) {
         await db().query(`delete from retro_hockey_signals where room_code=$1`, [code]);
         await db().query(`update retro_pong_games set status='lobby',players='[]'::jsonb,left_score=0,right_score=0,winner_side=null,started_at=null,updated_at=now() where room_code=$1`, [code]).catch(() => undefined);
         await db().query(`update retro_rps_games set status='lobby',players='[]'::jsonb,round_index=0,left_score=0,right_score=0,choices='{}'::jsonb,phase='choosing',phase_started_at=null,phase_ends_at=null,last_result=null,winner_side=null,updated_at=now() where room_code=$1`, [code]).catch(() => undefined);
+        await db().query(`update retro_pool_games set status='lobby',players='[]'::jsonb,turn_index=0,groups='{}'::jsonb,shot=null,winner_id=null,last_message=null,updated_at=now() where room_code=$1`, [code]).catch(() => undefined);
         const requestedBot = String(data.botDifficulty ?? "");
         const botDifficulty: BotDifficulty | null = requestedBot === "easy" || requestedBot === "normal" || requestedBot === "hard" ? requestedBot : null;
         const rawAssignments = data.teamAssignments && typeof data.teamAssignments === "object" && !Array.isArray(data.teamAssignments) ? data.teamAssignments as Record<string, unknown> : {};

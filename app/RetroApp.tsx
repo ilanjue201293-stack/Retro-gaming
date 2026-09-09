@@ -47,6 +47,7 @@ export default function RetroApp() {
   const [roomBusy, setRoomBusy] = useState(false);
   const [toast, setToast] = useState("");
   const [hockeyActive, setHockeyActive] = useState(false);
+  const [activeGame, setActiveGame] = useState<"hockey" | "pool" | null>(null);
 
   const me = useCallback(async () => {
     try {
@@ -67,6 +68,15 @@ export default function RetroApp() {
     return () => window.clearTimeout(id);
   }, [toast]);
 
+  useEffect(() => {
+    const onGameActive = (event: Event) => {
+      const detail = (event as CustomEvent<string | null>).detail;
+      setActiveGame(detail === "hockey" || detail === "pool" ? detail : null);
+    };
+    window.addEventListener("retro:game-active", onGameActive as EventListener);
+    return () => window.removeEventListener("retro:game-active", onGameActive as EventListener);
+  }, []);
+
   const refreshSocial = useCallback(async () => {
     if (!user) return;
     try {
@@ -83,9 +93,9 @@ export default function RetroApp() {
   useEffect(() => {
     if (!user) return;
     void refreshSocial();
-    const id = window.setInterval(() => void refreshSocial(), 3000);
+    const id = window.setInterval(() => void refreshSocial(), activeGame ? 8000 : 3000);
     return () => window.clearInterval(id);
-  }, [user, refreshSocial]);
+  }, [user, refreshSocial, activeGame]);
 
   const refreshRoom = useCallback(async (code: string) => {
     const data = await post("/api/rooms", { action: "state", code });
@@ -125,9 +135,9 @@ export default function RetroApp() {
         busy = false;
       }
     };
-    const id = window.setInterval(poll, 1000);
+    const id = window.setInterval(poll, activeGame ? 2200 : 1000);
     return () => { alive = false; window.clearInterval(id); };
-  }, [room?.code]);
+  }, [room?.code, activeGame]);
 
   const submitAuth = async (event: FormEvent) => {
     event.preventDefault();
@@ -269,11 +279,11 @@ export default function RetroApp() {
                 <span className={`presence ${member.online ? "online" : ""}`}/>
               </div>)}
             </div>
-            <HockeyGame room={room} user={user} onActiveChange={setHockeyActive}/>
-            <PongGame room={room} user={user}/>
-            <RpsGame room={room} user={user}/>
-            <DunkshotGame room={room} user={user}/>
-            <PoolGame room={room} user={user}/>
+            {(!activeGame || activeGame === "hockey") && <HockeyGame room={room} user={user} onActiveChange={setHockeyActive}/>}
+            {!activeGame && <PongGame room={room} user={user}/>}
+            {!activeGame && <RpsGame room={room} user={user}/>}
+            {!activeGame && <DunkshotGame room={room} user={user}/>}
+            {(!activeGame || activeGame === "pool") && <PoolGame room={room} user={user}/>}
           </section>
           <aside className="roomSide">
             <section className="panel">
@@ -290,7 +300,7 @@ export default function RetroApp() {
           </aside>
         </div>
       )}
-      <RoomComms code={room.code} user={user}/>
+      <RoomComms code={room.code} user={user} gameActive={Boolean(activeGame)}/>
     </main>;
   }
 

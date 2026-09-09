@@ -5,7 +5,8 @@ import { CSSProperties, PointerEvent, useEffect, useMemo, useRef, useState } fro
 type User = { id: string; username: string };
 type RoomMember = { id: string; username: string; online: boolean; joined_at: string };
 type Room = { code: string; hostId: string; members: RoomMember[] };
-type Player = { userId: string; username: string };
+type BotDifficulty = "easy" | "normal" | "hard";
+type Player = { userId: string; username: string; isBot?: boolean; difficulty?: BotDifficulty };
 type Group = "solids" | "stripes" | null;
 type Ball = { id: number; x: number; y: number; vx: number; vy: number; pocketed: boolean };
 type Shot = { id: string; shooterId: string; angle: number; power: number; startedAt: number };
@@ -167,6 +168,7 @@ export default function PoolGame({ room, user }: { room: Room; user: User }) {
   const [game, setGame] = useState<Game | null>(null);
   const [tab, setTab] = useState<"solo" | "duel">("solo");
   const [selectedOpponent, setSelectedOpponent] = useState("");
+  const [botDifficulty, setBotDifficulty] = useState<BotDifficulty>("normal");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [focusSuppressed, setFocusSuppressed] = useState(false);
@@ -180,6 +182,7 @@ export default function PoolGame({ room, user }: { room: Room; user: User }) {
   const tableRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{ pointerId: number } | null>(null);
   const resolvedRef = useRef<Set<string>>(new Set());
+  const botActionRef = useRef(false);
 
   const isHost = room.hostId === user.id;
   const onlineMembers = useMemo(() => room.members.filter((member) => member.online), [room.members]);
@@ -204,7 +207,7 @@ export default function PoolGame({ room, user }: { room: Room; user: User }) {
       if (!alive) return;
       try { const data = await post({ action: "state", code: room.code }); if (alive) { setGame(data.game as Game); setError(""); } }
       catch (pollError) { if (alive && !game) setError(pollError instanceof Error ? pollError.message : "Billard indisponible."); }
-      if (alive) timer = window.setTimeout(() => void poll(), duelActive ? 350 : 1400);
+      if (alive) timer = window.setTimeout(() => void poll(), duelActive ? 160 : 2200);
     };
     void poll(); return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };
   }, [room.code, duelActive]);
@@ -224,6 +227,10 @@ export default function PoolGame({ room, user }: { room: Room; user: User }) {
     document.body.classList.toggle("pool-match-active", active && !focusSuppressed);
     return () => document.body.classList.remove("pool-match-active");
   }, [active, focusSuppressed]);
+
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent("retro:game-active", { detail: active ? "pool" : null }));
+  }, [active]);
 
   useEffect(() => {
     if (!activeShot) return;
@@ -248,7 +255,9 @@ export default function PoolGame({ room, user }: { room: Room; user: User }) {
         else setSoloMessage("Aucune bille empochée.");
         return;
       }
-      if (activeShot.shooterId === user.id && !resolvedRef.current.has(activeShot.id)) {
+      const shotPlayer = game?.players.find((player) => player.userId === activeShot.shooterId);
+      const canResolve = activeShot.shooterId === user.id || Boolean(isHost && shotPlayer?.isBot);
+      if (canResolve && !resolvedRef.current.has(activeShot.id)) {
         resolvedRef.current.add(activeShot.id);
         void post({ action: "resolve", code: room.code, shotId: activeShot.id }).then((data) => setGame(data.game as Game)).catch((resolveError) => setError(resolveError instanceof Error ? resolveError.message : "Impossible de valider le coup."));
       }
@@ -266,13 +275,24 @@ export default function PoolGame({ room, user }: { room: Room; user: User }) {
     return () => { finished = true; cancelAnimationFrame(raf); };
   }, [activeShot?.id]);
 
+  useEffect(() => {
+    if (!duelActive || game?.status !== "playing" || !isHost || game.shot || !currentPlayer?.isBot) { botActionRef.current = false; return; }
+    if (botActionRef.current) return;
+    botActionRef.current = true;
+    const delay = currentPlayer.difficulty === "easy" ? 850 : currentPlayer.difficulty === "hard" ? 360 : 560;
+    const id = window.setTimeout(() => {
+      void post({ action: "botShoot", code: room.code }).then((data) => setGame(data.game as Game)).catch((botError) => setError(botError instanceof Error ? botError.message : "Le bot n'a pas pu jouer.")).finally(() => { botActionRef.current = false; });
+    }, delay);
+    return () => window.clearTimeout(id);
+  }, [duelActive, game?.status, game?.turnIndex, game?.shot?.id, currentPlayer?.userId, isHost, room.code]);
+
   const startSolo = () => {
     const balls = rackBalls(); setSoloBalls(balls); setVisualBalls(cloneBalls(balls)); setSoloShot(null); setSoloDone(false); setSoloMessage("Empoche toutes les billes."); setSoloActive(true); setFocusSuppressed(false); setAim(null);
   };
   const exitSolo = () => { setSoloActive(false); setSoloShot(null); setSoloDone(false); setAim(null); setFocusSuppressed(false); };
 
-  const startDuel = async (opponentId = selectedOpponent) => {
-    try { setBusy(true); setError(""); setFocusSuppressed(false); setAim(null); const data = await post({ action: "start", code: room.code, opponentId }); setGame(data.game as Game); setVisualBalls(cloneBalls(data.game.balls as Ball[])); }
+  const startDuel = async (opponentId = selectedOpponent, botDifficultyValue: BotDifficulty | null = null) => {
+    try { setBusy(true); setError(""); setFocusSuppressed(false); setAim(null); const data = await post({ action: "start", code: room.code, opponentId, botDifficulty: botDifficultyValue }); setGame(data.game as Game); setVisualBalls(cloneBalls(data.game.balls as Ball[])); }
     catch (actionError) { setError(actionError instanceof Error ? actionError.message : "Impossible de lancer le billard."); }
     finally { setBusy(false); }
   };
@@ -300,9 +320,13 @@ export default function PoolGame({ room, user }: { room: Room; user: User }) {
   };
   const shoot = async (angle: number, power: number) => {
     setAim(null);
-    if (soloActive) { setSoloShot({ id: `solo-pool-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, shooterId: user.id, angle, power, startedAt: Date.now() + 60 }); return; }
-    try { const data = await post({ action: "shoot", code: room.code, angle, power }); setGame(data.game as Game); }
-    catch (actionError) { setError(actionError instanceof Error ? actionError.message : "Coup impossible."); }
+    if (soloActive) { setSoloShot({ id: `solo-pool-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, shooterId: user.id, angle, power, startedAt: Date.now() + 20 }); return; }
+    const shotId = `pool-${user.id}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const startedAt = Date.now() + 20;
+    const optimistic: Shot = { id: shotId, shooterId: user.id, angle, power, startedAt };
+    setGame((current) => current ? { ...current, shot: optimistic, lastMessage: null } : current);
+    try { const data = await post({ action: "shoot", code: room.code, angle, power, shotId, startedAt }); setGame(data.game as Game); }
+    catch (actionError) { setGame((current) => current?.shot?.id === shotId ? { ...current, shot: null } : current); setError(actionError instanceof Error ? actionError.message : "Coup impossible."); }
   };
   const pointerUp = (event: PointerEvent<HTMLDivElement>) => {
     if (!dragRef.current || dragRef.current.pointerId !== event.pointerId) return;
@@ -316,7 +340,8 @@ export default function PoolGame({ room, user }: { room: Room; user: User }) {
   if (!duelActive && !soloActive) return <section className="poolLobby">
     <div className="poolHero"><div className="poolHeroIcon">🎱</div><div><span className="kicker">BILLARD · ARCADE</span><h2>Billard</h2><p>Attrape la blanche, tire la queue vers l'arrière, règle ta puissance puis relâche. Collisions, bandes et poches sont physiques.</p></div></div>
     <div className="poolTabs"><button className={tab === "solo" ? "active" : ""} onClick={() => setTab("solo")}><strong>SOLO</strong><small>Nettoie toute la table</small></button><button className={tab === "duel" ? "active" : ""} onClick={() => setTab("duel")}><strong>1 VS 1</strong><small>Règles 8-ball arcade</small></button></div>
-    {tab === "solo" ? <div className="poolSetup"><div><strong>Entraînement</strong><small>Empoche les 15 billes. Si la blanche tombe, elle est replacée automatiquement.</small></div><button className="primaryButton" onClick={startSolo}>Jouer en solo</button></div> : <div className="poolSetup"><div><strong>8-ball arcade</strong><small>La première couleur empochée attribue pleines/rayées. Vide ton groupe puis empoche la noire. Si tu mets la noire trop tôt, tu perds.</small></div>{isHost ? <><label><span>Adversaire</span><select value={selectedOpponent} disabled={!opponents.length || busy} onChange={(event) => setSelectedOpponent(event.target.value)}>{opponents.map((member) => <option key={member.id} value={member.id}>{member.username}</option>)}</select></label><button className="primaryButton" disabled={!selectedOpponent || busy} onClick={() => void startDuel()}>{busy ? "Lancement…" : "Lancer le 1v1"}</button></> : <small className="poolWaiting">En attente de l'hôte…</small>}</div>}
+    {tab === "solo" ? <div className="poolSetup"><div><strong>Entraînement</strong><small>Empoche les 15 billes. Si la blanche tombe, elle est replacée automatiquement.</small></div><button className="primaryButton" onClick={startSolo}>Jouer en solo</button></div> : <div className="poolSetup"><div><strong>8-ball arcade</strong><small>La première couleur empochée attribue pleines/rayées. Vide ton groupe puis empoche la noire. Si tu mets la noire trop tôt, tu perds.</small></div>{isHost ? <><label><span>Adversaire</span><select value={selectedOpponent} disabled={!opponents.length || busy} onChange={(event) => setSelectedOpponent(event.target.value)}>{opponents.length ? opponents.map((member) => <option key={member.id} value={member.id}>{member.username}</option>) : <option value="">Aucun ami connecté</option>}</select></label><button className="primaryButton" disabled={!selectedOpponent || busy} onClick={() => void startDuel()}>{busy ? "Lancement…" : "Lancer le 1v1"}</button></> : <small className="poolWaiting">En attente de l'hôte…</small>}</div>}
+    {tab === "duel" && isHost && <div className="botPlayPanel poolBotPanel"><div><strong>🤖 Jouer contre un bot</strong><small>Le bot vise, dose sa puissance et joue automatiquement à son tour.</small></div><select value={botDifficulty} onChange={(event) => setBotDifficulty(event.target.value as BotDifficulty)}><option value="easy">Facile</option><option value="normal">Normal</option><option value="hard">Difficile</option></select><button disabled={busy} onClick={() => void startDuel("", botDifficulty)}>Lancer vs BOT</button></div>}
     {error && <div className="errorBox">{error}</div>}
   </section>;
 
@@ -335,8 +360,9 @@ export default function PoolGame({ room, user }: { room: Room; user: User }) {
     const pocketed = new Set((game.balls ?? []).filter((ball) => ball.pocketed).map((ball) => ball.id));
     return Array.from({ length: 7 }, (_, index) => {
       const id = ids[index];
-      const filled = Boolean(id && pocketed.has(id));
-      return <span key={`${player?.userId ?? "empty"}-${index}`} className={`poolHudBall ${filled ? `filled ball-${id}` : ""}`}><i>{filled ? id : ""}</i></span>;
+      const assigned = Boolean(id);
+      const pocketedBall = Boolean(id && pocketed.has(id));
+      return <span key={`${player?.userId ?? "empty"}-${index}`} className={`poolHudBall ${assigned ? `assigned ball-${id}` : ""} ${pocketedBall ? "pocketed" : ""}`}><i>{assigned ? id : ""}</i></span>;
     });
   };
 
@@ -352,7 +378,7 @@ export default function PoolGame({ room, user }: { room: Room; user: User }) {
       {aim && cueBall && !activeShot && <><div className="poolGuide" style={guideStyle}><span/></div>{aimPrediction && <div className="poolTargetPrediction" style={predictionStyle}><i/></div>}<div className={`poolCueWrap ${powerClass}`} style={guideStyle}><div className="poolCueStick" style={{ width: `${150 + aim.power * 150}px`, right: `${22 + aim.power * 72}px` }}/></div></>}
       {visualBalls.filter((ball) => !ball.pocketed).map((ball) => <div key={ball.id} className={`poolBall ball-${ball.id} ${ball.id === 0 ? "cueBall" : ""}`} style={{ left: `${ball.x * 100}%`, top: `${ball.y * 200}%` }}><span>{ball.id === 0 ? "" : ball.id}</span></div>)}
       {aim && <div className={`poolPower ${powerClass}`}><small>PUISSANCE</small><div><i style={{ height: `${Math.max(4, aim.power * 100)}%` }}/></div><strong>{Math.round(aim.power * 100)}</strong></div>}
-      {(soloDone || game.status === "gameover") && <div className="poolGameOver"><span>🎱</span><small>{soloDone ? "TABLE NETTOYÉE" : "PARTIE TERMINÉE"}</small><h2>{soloDone ? "Bien joué !" : `${winner?.username ?? "Joueur"} gagne !`}</h2>{soloDone ? <div className="gameEndActions"><button className="primaryButton" onClick={startSolo}>Rejouer</button><button className="secondaryButton" onClick={exitSolo}>Lobby du jeu</button></div> : isHost ? <div className="gameEndActions"><button className="primaryButton" disabled={busy} onClick={() => void startDuel(game.players.find((player) => player.userId !== user.id)?.userId ?? selectedOpponent)}>Rejouer</button><button className="secondaryButton" disabled={busy} onClick={() => void stopDuel()}>Lobby du jeu</button></div> : <small>En attente de l'hôte…</small>}</div>}
+      {(soloDone || game.status === "gameover") && <div className="poolGameOver"><span>🎱</span><small>{soloDone ? "TABLE NETTOYÉE" : "PARTIE TERMINÉE"}</small><h2>{soloDone ? "Bien joué !" : `${winner?.username ?? "Joueur"} gagne !`}</h2>{soloDone ? <div className="gameEndActions"><button className="primaryButton" onClick={startSolo}>Rejouer</button><button className="secondaryButton" onClick={exitSolo}>Lobby du jeu</button></div> : isHost ? <div className="gameEndActions"><button className="primaryButton" disabled={busy} onClick={() => { const other = game.players.find((player) => player.userId !== user.id); void startDuel(other?.isBot ? "" : other?.userId ?? selectedOpponent, other?.isBot ? other.difficulty ?? botDifficulty : null); }}>Rejouer</button><button className="secondaryButton" disabled={busy} onClick={() => void stopDuel()}>Lobby du jeu</button></div> : <small>En attente de l'hôte…</small>}</div>}
     </div>
     <div className="poolStatusLine">{soloActive ? soloMessage : game.lastMessage ?? "Casse la table et empoche ton groupe."}</div>
     {error && <div className="errorBox poolError">{error}</div>}

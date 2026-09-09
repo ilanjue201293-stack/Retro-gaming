@@ -30,7 +30,7 @@ function RemoteAudio({stream}:{stream:MediaStream}){
   return <audio ref={ref} autoPlay playsInline/>;
 }
 
-export default function RoomComms({code,user}:{code:string;user:User}){
+export default function RoomComms({code,user,gameActive=false}:{code:string;user:User;gameActive?:boolean}){
   const[panel,setPanel]=useState<"chat"|"voice"|null>(null);
   const[messages,setMessages]=useState<ChatMessage[]>([]);
   const[draft,setDraft]=useState("");
@@ -95,8 +95,8 @@ export default function RoomComms({code,user}:{code:string;user:User}){
       }catch(e){if(alive)setChatError(e instanceof Error?e.message:"Chat indisponible.")}
       finally{busy=false}
     };
-    void poll();const id=setInterval(poll,1000);return()=>{alive=false;clearInterval(id)};
-  },[code,user.id]);
+    void poll();const id=setInterval(poll,gameActive?2500:1000);return()=>{alive=false;clearInterval(id)};
+  },[code,user.id,gameActive]);
 
   useEffect(()=>{if(panel==="chat"&&listRef.current)listRef.current.scrollTop=listRef.current.scrollHeight},[panel,messages.length]);
 
@@ -217,8 +217,8 @@ export default function RoomComms({code,user}:{code:string;user:User}){
   useEffect(()=>{
     if(voiceJoined)return;let alive=true;
     const poll=async()=>{try{const data=await post("/api/voice",{action:"state",code});if(alive)setVoiceParticipants(data.participants??[])}catch{}};
-    void poll();const id=setInterval(poll,2000);return()=>{alive=false;clearInterval(id)};
-  },[voiceJoined,code]);
+    void poll();const id=setInterval(poll,gameActive?5000:2000);return()=>{alive=false;clearInterval(id)};
+  },[voiceJoined,code,gameActive]);
 
   useEffect(()=>()=>{void leaveVoice()},[code]);
 
