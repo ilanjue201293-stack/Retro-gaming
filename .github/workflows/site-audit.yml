@@ -15,6 +15,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Repair patch runner
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/site-audit.py')
+          s = p.read_text()
+          bad = "replace_once('app/RetroApp.tsx', 'onClick={() => void createRoom()}', 'onClick={() => void createRoom(\"hockey\")}')\n"
+          if bad not in s:
+              raise SystemExit('runner repair anchor missing')
+          p.write_text(s.replace(bad, '', 1))
+          PY
       - name: Apply full audit patch
         run: python scripts/site-audit.py
       - name: Install dependencies
