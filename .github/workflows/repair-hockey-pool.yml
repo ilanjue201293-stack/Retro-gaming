@@ -1,0 +1,151 @@
+name: Repair Hockey ordering and Pool touch
+
+on:
+  push:
+    paths:
+      - '.github/workflows/repair-hockey-pool.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Apply focused multiplayer and touch fixes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def rep(text, old, new, label, count=1):
+              found = text.count(old)
+              if found != count:
+                  raise SystemExit(f"{label}: expected {count}, found {found}")
+              return text.replace(old, new)
+
+          path = Path('app/HockeyGame.tsx')
+          s = path.read_text()
+
+          s = rep(s,
+          'function predictPuck(puck: Puck, ageSeconds: number) {\n  const dt = Math.min(ageSeconds, 0.11);',
+          'function predictPuck(puck: Puck, ageSeconds: number) {\n  const dt = Math.min(ageSeconds, 0.24);',
+          'extend guest puck prediction')
+
+          s = rep(s,
+          '  const peerStartedAtRef = useRef<Map<string, number>>(new Map());',
+          '  const peerStartedAtRef = useRef<Map<string, number>>(new Map());\n  const stateSequenceRef = useRef(0);\n  const inputSequenceRef = useRef(0);\n  const lastRemoteStateSequenceRef = useRef(-1);\n  const lastRemoteInputSequenceRef = useRef<Map<string, number>>(new Map());',
+          'add packet sequence refs')
+
+          s = rep(s,
+          '  const receiveInput = useCallback((senderId: string, payloadValue: unknown) => {\n    const current = gameRef.current, simulation = simulationRef.current;',
+          '  const receiveInput = useCallback((senderId: string, payloadValue: unknown, sequenceValue?: unknown) => {\n    const sequence = Number(sequenceValue);\n    if (Number.isFinite(sequence)) {\n      const previous = lastRemoteInputSequenceRef.current.get(senderId) ?? -1;\n      if (sequence <= previous) return;\n      lastRemoteInputSequenceRef.current.set(senderId, sequence);\n    }\n    const current = gameRef.current, simulation = simulationRef.current;',
+          'ignore stale remote inputs')
+
+          s = rep(s,
+          '  const receiveState = useCallback((payloadValue: unknown) => {\n    if (!payloadValue || typeof payloadValue !== "object") return;',
+          '  const receiveState = useCallback((payloadValue: unknown, sequenceValue?: unknown) => {\n    const sequence = Number(sequenceValue);\n    if (Number.isFinite(sequence)) {\n      if (sequence <= lastRemoteStateSequenceRef.current) return;\n      lastRemoteStateSequenceRef.current = sequence;\n    }\n    if (!payloadValue || typeof payloadValue !== "object") return;',
+          'ignore stale remote states')
+
+          s = rep(s,
+          '      if (hostSide && simulationRef.current && channel.readyState === "open") { try { channel.send(JSON.stringify({ type: "state", state: simulationRef.current.frame })); } catch {} }',
+          '      if (hostSide && simulationRef.current && channel.readyState === "open") { try { channel.send(JSON.stringify({ type: "state", seq: ++stateSequenceRef.current, state: simulationRef.current.frame })); } catch {} }',
+          'sequence initial state')
+
+          s = rep(s,
+          '        if (hostSide && message.type === "input") receiveInput(peerId, message.input);',
+          '        if (hostSide && message.type === "input") receiveInput(peerId, message.input, message.seq);',
+          'sequence direct inputs')
+
+          s = rep(s,
+          '          lastDirectStateAtRef.current = performance.now(); receiveState(message.state);',
+          '          lastDirectStateAtRef.current = performance.now(); receiveState(message.state, message.seq);',
+          'sequence direct states')
+
+          s = rep(s,
+          '    const existing = peersRef.current.get(peerId); const now = performance.now(); const ackAge = now - (directAckRef.current.get(peerId) ?? 0); const connectingAge = now - (peerStartedAtRef.current.get(peerId) ?? 0); if (existing?.dc?.readyState === "open" && ackAge < 1800) return; if (existing?.pc.connectionState === "connecting" && connectingAge < 3500) return;',
+          '    const existing = peersRef.current.get(peerId); const now = performance.now(); const ackAge = now - (directAckRef.current.get(peerId) ?? 0); const connectingAge = now - (peerStartedAtRef.current.get(peerId) ?? 0); if (existing?.dc?.readyState === "open" && ackAge < 4500) return; if ((existing?.pc.connectionState === "connecting" || existing?.pc.connectionState === "new") && connectingAge < 6500) return;',
+          'avoid WebRTC reconnect flapping')
+
+          s = rep(s,
+          'const channel = entry.pc.createDataChannel("retro-hockey", { ordered: false, maxPacketLifeTime: 180 });',
+          'const channel = entry.pc.createDataChannel("retro-hockey", { ordered: false, maxPacketLifeTime: 240 });',
+          'tune realtime channel lifetime')
+
+          s = rep(s,
+          '    if (signal.kind === "input") { if (user.id === hostId) receiveInput(signal.senderId, signal.payload); return; }\n    if (signal.kind === "state") { if (user.id !== hostId && signal.senderId === hostId) receiveState(signal.payload); return; }',
+          '    if (signal.kind === "input") { if (user.id === hostId) { const wrapped = signal.payload as { seq?: unknown; input?: unknown } | null; receiveInput(signal.senderId, wrapped && typeof wrapped === "object" && "input" in wrapped ? wrapped.input : signal.payload, wrapped?.seq); } return; }\n    if (signal.kind === "state") { if (user.id !== hostId && signal.senderId === hostId) { const wrapped = signal.payload as { seq?: unknown; state?: unknown } | null; receiveState(wrapped && typeof wrapped === "object" && "state" in wrapped ? wrapped.state : signal.payload, wrapped?.seq); } return; }',
+          'sequence fallback packets')
+
+          s = rep(s,
+          '          directReady = remotes.length > 0 && remotes.every((player) => peersRef.current.get(player.userId)?.dc?.readyState === "open" && now - (directAckRef.current.get(player.userId) ?? 0) < 1200);\n        } else directReady = peersRef.current.get(room.hostId)?.dc?.readyState === "open" && now - lastDirectStateAtRef.current < 1200;',
+          '          directReady = remotes.length > 0 && remotes.every((player) => peersRef.current.get(player.userId)?.dc?.readyState === "open" && now - (directAckRef.current.get(player.userId) ?? 0) < 2500);\n        } else directReady = peersRef.current.get(room.hostId)?.dc?.readyState === "open" && now - lastDirectStateAtRef.current < 2500;',
+          'relax direct health threshold')
+
+          s = rep(s,
+          '      timer = window.setTimeout(() => void signalPoll(), directReady ? 700 : 120);',
+          '      timer = window.setTimeout(() => void signalPoll(), directReady ? 850 : 70);',
+          'speed up unhealthy fallback polling')
+
+          s = rep(s,
+          '    ensure(); const id = window.setInterval(ensure, 900); return () => window.clearInterval(id);',
+          '    ensure(); const id = window.setInterval(ensure, 1500); return () => window.clearInterval(id);',
+          'reduce peer restart churn')
+
+          s = rep(s,
+          '    signalCursorRef.current = 0; resetLocalToStart(game);',
+          '    signalCursorRef.current = 0; stateSequenceRef.current = 0; inputSequenceRef.current = 0; lastRemoteStateSequenceRef.current = -1; lastRemoteInputSequenceRef.current.clear(); resetLocalToStart(game);',
+          'reset packet sequences on match')
+
+          s = rep(s,
+          '      if (now - simulation.lastBroadcast >= 33) { simulation.lastBroadcast = now; const message = JSON.stringify({ type: "state", state: simulation.frame }); for (const player of current.players) { if (player.userId === user.id || player.isBot) continue; const channel = peersRef.current.get(player.userId)?.dc; if (channel?.readyState === "open") { try { channel.send(message); } catch {} } } }',
+          '      if (now - simulation.lastBroadcast >= 33) { simulation.lastBroadcast = now; const seq = ++stateSequenceRef.current; const message = JSON.stringify({ type: "state", seq, state: simulation.frame }); for (const player of current.players) { if (player.userId === user.id || player.isBot) continue; const channel = peersRef.current.get(player.userId)?.dc; if (channel?.readyState === "open" && channel.bufferedAmount < 32768) { try { channel.send(message); } catch {} } } }',
+          'sequence direct state broadcasts')
+
+          s = rep(s,
+          '      if (now - simulation.lastFallbackBroadcast >= 150) { simulation.lastFallbackBroadcast = now; for (const player of current.players) { if (player.userId === user.id || player.isBot) continue; const channel = peersRef.current.get(player.userId)?.dc; const healthy = channel?.readyState === "open" && now - (directAckRef.current.get(player.userId) ?? 0) < 900; if (!healthy) void sendSignal(player.userId, "state", simulation.frame).catch(() => undefined); } }',
+          '      if (now - simulation.lastFallbackBroadcast >= 85) { simulation.lastFallbackBroadcast = now; const seq = ++stateSequenceRef.current; for (const player of current.players) { if (player.userId === user.id || player.isBot) continue; const channel = peersRef.current.get(player.userId)?.dc; const healthy = channel?.readyState === "open" && channel.bufferedAmount < 32768 && now - (directAckRef.current.get(player.userId) ?? 0) < 2200; if (!healthy) void sendSignal(player.userId, "state", { seq, state: simulation.frame }).catch(() => undefined); } }',
+          'smooth fallback state broadcasts')
+
+          s = rep(s,
+          'if (player.userId === user.id && localPaddleRef.current) next.paddles[player.userId] = { ...server, ...localPaddleRef.current }; else { const dt = Math.min(age, 0.075), predicted = clampPaddle(player.side, server.x + server.vx * dt, server.y + server.vy * dt);',
+          'if (player.userId === user.id && localPaddleRef.current) next.paddles[player.userId] = { ...server, ...localPaddleRef.current }; else { const dt = Math.min(age, 0.18), predicted = clampPaddle(player.side, server.x + server.vx * dt, server.y + server.vy * dt);',
+          'extend remote paddle prediction')
+
+          old = '  const sendRemoteInput = useCallback((packet: InputPacket, force = false) => {\n    if (room.hostId === user.id) return; const now = performance.now(), channel = peersRef.current.get(room.hostId)?.dc;\n    const directHealthy = channel?.readyState === "open" && now - lastDirectStateAtRef.current < 1200;\n    if (channel?.readyState === "open") { if (force || now - lastDirectInputSendRef.current >= 12) { lastDirectInputSendRef.current = now; try { channel.send(JSON.stringify({ type: "input", input: packet })); } catch {} } if (directHealthy) return; }\n    if (force || now - lastFallbackInputSendRef.current >= 100) { lastFallbackInputSendRef.current = now; void sendSignal(room.hostId, "input", packet).catch(() => undefined); }\n  }, [room.hostId, sendSignal, user.id]);'
+          new = '  const sendRemoteInput = useCallback((packet: InputPacket, force = false) => {\n    if (room.hostId === user.id) return; const now = performance.now(), channel = peersRef.current.get(room.hostId)?.dc;\n    const seq = ++inputSequenceRef.current;\n    const directHealthy = channel?.readyState === "open" && channel.bufferedAmount < 16384 && now - lastDirectStateAtRef.current < 2500;\n    if (channel?.readyState === "open" && channel.bufferedAmount < 16384) { if (force || now - lastDirectInputSendRef.current >= 12) { lastDirectInputSendRef.current = now; try { channel.send(JSON.stringify({ type: "input", seq, input: packet })); } catch {} } if (directHealthy) return; }\n    if (force || now - lastFallbackInputSendRef.current >= 70) { lastFallbackInputSendRef.current = now; void sendSignal(room.hostId, "input", { seq, input: packet }).catch(() => undefined); }\n  }, [room.hostId, sendSignal, user.id]);'
+          s = rep(s, old, new, 'sequence and smooth remote inputs')
+
+          path.write_text(s)
+
+          path = Path('app/PoolGame.tsx')
+          s = path.read_text()
+          s = rep(s,
+          '    return { x: clamp((event.clientX - rect.left) / rect.width, 0, 1), y: clamp((event.clientY - rect.top) / rect.height * 0.5, 0, 0.5) };',
+          '    return { x: (event.clientX - rect.left) / rect.width, y: (event.clientY - rect.top) / rect.height * 0.5 };',
+          'allow Pool pull outside table')
+          s = rep(s,
+          '    const dx = cueBall.x - point.x, dy = cueBall.y - point.y;\n    setAim({ angle: Math.atan2(dy, dx), power: clamp(Math.hypot(dx, dy) / 0.23, 0, 1) });',
+          '    const dx = cueBall.x - point.x, dy = cueBall.y - point.y;\n    const rawPower = clamp(Math.hypot(dx, dy) / 0.23, 0, 1);\n    const edgeReached = event.clientX <= 22 || event.clientX >= window.innerWidth - 22 || event.clientY <= 22 || event.clientY >= window.innerHeight - 22;\n    const power = edgeReached && rawPower >= 0.12 ? 1 : rawPower;\n    setAim({ angle: Math.atan2(dy, dx), power });',
+          'boost Pool power at screen edge')
+          path.write_text(s)
+          PY
+      - name: Install dependencies
+        run: npm install
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Commit final repair
+        shell: bash
+        run: |
+          rm .github/workflows/repair-hockey-pool.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/HockeyGame.tsx app/PoolGame.tsx .github/workflows/repair-hockey-pool.yml
+          git commit -m 'Stabilize Hockey packet ordering and Pool touch power'
+          git push
