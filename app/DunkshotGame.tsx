@@ -80,7 +80,6 @@ function simulateShot(power: number, aim: number, elapsed: number, startedAt: nu
   let floorBounces = 0;
   let t = 0;
   const end = clamp(elapsed, 0, 2.7);
-  const shotHoop = hoopPosition(streak, startedAt);
 
   while (t < end) {
     const dt = Math.min(PHYSICS_STEP, end - t);
@@ -90,7 +89,7 @@ function simulateShot(power: number, aim: number, elapsed: number, startedAt: nu
     y += vy * dt;
     rotation += (260 + Math.abs(vx) * 920) * dt * (vx < -0.01 ? -1 : 1);
 
-    const hoop = shotHoop;
+    const hoop = hoopPosition(streak, startedAt + (t + dt) * 1000);
     const rimY = hoop.y + RIM_Y_OFFSET;
 
     if (!made && floorBounces === 0 && previousY < rimY && y >= rimY && vy > 0 && Math.abs(x - hoop.x) < SCORE_HALF) {
@@ -109,7 +108,7 @@ function simulateShot(power: number, aim: number, elapsed: number, startedAt: nu
         const dx = x - rimX;
         const dy = y - rimY;
         const distance = Math.hypot(dx, dy);
-        if (distance > 0.0001 && distance < RIM_COLLISION_RADIUS) {
+        if (dy <= 0.002 && distance > 0.0001 && distance < RIM_COLLISION_RADIUS) {
           const nx = dx / distance;
           const ny = dy / distance;
           const approach = vx * nx + vy * ny;
@@ -188,7 +187,7 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
   const canShoot = canShootSolo || canShootDuel;
   const activeShot = soloActive ? soloShot : game?.shot ?? null;
   const activeStreak = soloActive ? soloRun?.streak ?? 0 : game?.streak ?? 0;
-  const hoop = activeShot ? hoopPosition(activeStreak, activeShot.startedAt) : hoopPosition(activeStreak, sceneTime);
+  const hoop = hoopPosition(activeStreak, sceneTime);
 
   useEffect(() => { soloRunRef.current = soloRun; }, [soloRun]);
 
@@ -359,13 +358,17 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
 
   const shoot = async (power: number, aim: number) => {
     setAimState(null);
+    const maxPowerDrift = power >= 0.97
+      ? (Math.random() < 0.5 ? -1 : 1) * (0.045 + Math.random() * 0.055)
+      : 0;
+    const actualAim = clamp(aim + maxPowerDrift, -1, 1);
     if (soloActive) {
-      const shot: Shot = { id: `solo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, shooterId: user.id, power, aim, startedAt: Date.now() + 70 };
+      const shot: Shot = { id: `solo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, shooterId: user.id, power, aim: actualAim, startedAt: Date.now() + 70 };
       setSoloShot(shot);
       return;
     }
     try {
-      const data = await post({ action: "shoot", code: room.code, power, aim });
+      const data = await post({ action: "shoot", code: room.code, power, aim: actualAim });
       setGame(data.game as Game);
     } catch (actionError) { setError(actionError instanceof Error ? actionError.message : "Tir impossible."); }
   };

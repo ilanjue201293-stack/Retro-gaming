@@ -153,7 +153,6 @@ function dunkshotShotMade(shot: Shot, streak: number) {
   let vy = -(1.08 + power * 0.83);
   let floorBounces = 0;
   let made = false;
-  const shotHoop = dunkHoopPosition(streak, shot.startedAt);
 
   for (let elapsed = 0; elapsed <= 2.65; elapsed += DUNK_STEP) {
     const previousY = y;
@@ -161,7 +160,7 @@ function dunkshotShotMade(shot: Shot, streak: number) {
     x += vx * DUNK_STEP;
     y += vy * DUNK_STEP;
 
-    const hoop = shotHoop;
+    const hoop = dunkHoopPosition(streak, shot.startedAt + (elapsed + DUNK_STEP) * 1000);
     const rimY = hoop.y + DUNK_RIM_Y_OFFSET;
 
     if (!made && floorBounces === 0 && previousY < rimY && y >= rimY && vy > 0 && Math.abs(x - hoop.x) < DUNK_SCORE_HALF) {
@@ -174,7 +173,7 @@ function dunkshotShotMade(shot: Shot, streak: number) {
         const dx = x - rimX;
         const dy = y - rimY;
         const distance = Math.hypot(dx, dy);
-        if (distance > 0.0001 && distance < DUNK_RIM_COLLISION_RADIUS) {
+        if (dy <= 0.002 && distance > 0.0001 && distance < DUNK_RIM_COLLISION_RADIUS) {
           const nx = dx / distance;
           const ny = dy / distance;
           const approach = vx * nx + vy * ny;
