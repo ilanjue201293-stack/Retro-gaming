@@ -28,8 +28,17 @@ export default function DashboardGameLibraryEnhancer() {
   const [target, setTarget] = useState<HTMLElement | null>(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
-    const sync = () => { const library = document.querySelector<HTMLElement>(".gamesPreview"); setTarget((current) => current === library ? current : library); const pill = library?.querySelector<HTMLElement>(".availablePill"); if (pill) pill.textContent = `${GAME_REGISTRY.length} JEUX`; };
-    sync(); const observer = new MutationObserver(sync); observer.observe(document.body, { childList: true, subtree: true }); return () => observer.disconnect();
+    const sync = () => {
+      const library = document.querySelector<HTMLElement>(".gamesPreview");
+      setTarget((current) => current === library ? current : library);
+      const pill = library?.querySelector<HTMLElement>(".availablePill");
+      const expected = `${GAME_REGISTRY.length} JEUX`;
+      if (pill && pill.textContent !== expected) pill.textContent = expected;
+    };
+    sync();
+    const observer = new MutationObserver(sync);
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => observer.disconnect();
   }, []);
   useEffect(() => {
     const click = async (event: MouseEvent) => {
