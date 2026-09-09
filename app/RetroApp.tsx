@@ -15,6 +15,7 @@ type Invite = { id: string; room_code: string; sender_name: string; created_at: 
 type SocialState = { friends: Friend[]; incoming: Request[]; outgoing: Request[]; roomInvites: Invite[] };
 type RoomMember = { id: string; username: string; online: boolean; joined_at: string };
 type Room = { code: string; hostId: string; members: RoomMember[] };
+type RoomGameKey = "hockey" | "pong" | "rps" | "dunkshot" | "pool" | "tictactoe" | "higherlower" | "hangman" | "flappy";
 
 async function post(path: string, payload: Record<string, unknown>) {
   const res = await fetch(path, {
@@ -48,6 +49,7 @@ export default function RetroApp() {
   const [toast, setToast] = useState("");
   const [hockeyActive, setHockeyActive] = useState(false);
   const [activeGame, setActiveGame] = useState<"hockey" | "pool" | null>(null);
+  const [selectedRoomGame, setSelectedRoomGame] = useState<RoomGameKey>("hockey");
 
   const me = useCallback(async () => {
     try {
@@ -76,6 +78,16 @@ export default function RetroApp() {
     window.addEventListener("retro:game-active", onGameActive as EventListener);
     return () => window.removeEventListener("retro:game-active", onGameActive as EventListener);
   }, []);
+  useEffect(() => {
+    const onCurrentGame = (event: Event) => {
+      const detail = (event as CustomEvent<RoomGameKey>).detail;
+      if (!detail) return;
+      setSelectedRoomGame(detail);
+      if (detail !== "hockey" && detail !== "pool") setActiveGame(null);
+    };
+    window.addEventListener("retro:current-game", onCurrentGame as EventListener);
+    return () => window.removeEventListener("retro:current-game", onCurrentGame as EventListener);
+  }, []);
 
   const refreshSocial = useCallback(async () => {
     if (!user) return;
@@ -93,7 +105,7 @@ export default function RetroApp() {
   useEffect(() => {
     if (!user) return;
     void refreshSocial();
-    const id = window.setInterval(() => void refreshSocial(), activeGame ? 8000 : 3000);
+    const id = window.setInterval(() => void refreshSocial(), activeGame ? 10000 : 4200);
     return () => window.clearInterval(id);
   }, [user, refreshSocial, activeGame]);
 
@@ -135,7 +147,7 @@ export default function RetroApp() {
         busy = false;
       }
     };
-    const id = window.setInterval(poll, activeGame ? 2200 : 1000);
+    const id = window.setInterval(poll, activeGame ? 3000 : 1500);
     return () => { alive = false; window.clearInterval(id); };
   }, [room?.code, activeGame]);
 
@@ -279,11 +291,11 @@ export default function RetroApp() {
                 <span className={`presence ${member.online ? "online" : ""}`}/>
               </div>)}
             </div>
-            {(!activeGame || activeGame === "hockey") && <HockeyGame room={room} user={user} onActiveChange={setHockeyActive}/>}
-            {!activeGame && <PongGame room={room} user={user}/>}
-            {!activeGame && <RpsGame room={room} user={user}/>}
-            {!activeGame && <DunkshotGame room={room} user={user}/>}
-            {(!activeGame || activeGame === "pool") && <PoolGame room={room} user={user}/>}
+            {selectedRoomGame === "hockey" && <HockeyGame room={room} user={user} onActiveChange={setHockeyActive}/>}
+            {selectedRoomGame === "pong" && <PongGame room={room} user={user}/>}
+            {selectedRoomGame === "rps" && <RpsGame room={room} user={user}/>}
+            {selectedRoomGame === "dunkshot" && <DunkshotGame room={room} user={user}/>}
+            {selectedRoomGame === "pool" && <PoolGame room={room} user={user}/>}
           </section>
           <aside className="roomSide">
             <section className="panel">

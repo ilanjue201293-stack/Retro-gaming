@@ -10,6 +10,7 @@ import "./bots.css";
 import "./dunkshot.css";
 import "./pool.css";
 import "./room-games.css";
+import "./mini-games.css";
 
 export const metadata: Metadata = {
   title: "Retro Gaming",

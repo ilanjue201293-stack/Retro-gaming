@@ -9,6 +9,10 @@ Portail privé de mini-jeux entre amis avec rooms persistantes, chat et vocal de
 - Pierre · Feuille · Ciseaux : 1v1 humain ou bot, nombre de manches configurable
 - Dunkshot : solo ou 1v1 tour par tour, tir à la puissance et à l'angle, vies configurables, panier mobile et difficulté progressive
 - Billard : solo ou 1v1 8-ball arcade, bots Facile/Normal/Difficile, collisions, bandes, poches et groupes pleines/rayées
+- Morpion : 1v1 ou bot
+- Le Plus ou Moins : défi solo contre le programme
+- Le Pendu : mots secrets et clavier de lettres
+- Flappy : clone arcade fluide au clic, tactile ou espace
 
 ## Inclus
 
