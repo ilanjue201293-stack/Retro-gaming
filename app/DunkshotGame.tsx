@@ -46,15 +46,17 @@ const formatClock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(M
 const timeLabel = (seconds: number) => seconds === 0 ? "Désactivé" : seconds < 60 ? `${seconds}s` : `${seconds / 60} min`;
 
 async function post(payload: Record<string, unknown>) {
-  const response = await fetch("/api/dunkshot", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    cache: "no-store",
-  });
-  const data = await response.json();
-  if (!response.ok || !data.ok) throw new Error(data.error || "Erreur Dunkshot.");
-  return data;
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 5500);
+  try {
+    const response = await fetch("/api/dunkshot", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), cache: "no-store", signal: controller.signal });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || "Erreur Dunkshot.");
+    return data;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw new Error("Dunkshot met trop de temps à répondre.");
+    throw error;
+  } finally { window.clearTimeout(timeout); }
 }
 
 function hoopPosition(streak: number, now: number): HoopPosition {
@@ -217,7 +219,7 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
       } catch (pollError) {
         if (alive && !game) setError(pollError instanceof Error ? pollError.message : "Dunkshot indisponible.");
       }
-      if (alive) timer = window.setTimeout(() => void poll(), duelActive ? 350 : 1400);
+      if (alive) timer = window.setTimeout(() => void poll(), duelActive ? 190 : 1100);
     };
     void poll();
     return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };
@@ -225,8 +227,8 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
 
   useEffect(() => {
     if (!active) return;
-    let raf = 0;
-    const tick = () => { setSceneTime(Date.now()); raf = requestAnimationFrame(tick); };
+    let raf = 0, lastPaint = 0;
+    const tick = (stamp: number) => { if (stamp - lastPaint >= 32) { lastPaint = stamp; setSceneTime(Date.now()); } raf = requestAnimationFrame(tick); };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
   }, [active]);
@@ -255,12 +257,12 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
       if (!current || !current.active) return;
       if (didMake) {
         const next = { ...current, score: current.score + 1, streak: current.streak + 1 };
-        setSoloRun(next);
+        soloRunRef.current = next; setSoloRun(next);
         setSoloMessage({ text: "PANIER !", made: true, at: Date.now() });
       } else {
         const lives = Math.max(0, current.lives - 1);
         const next = { ...current, lives, streak: 0, gameover: lives <= 0 };
-        setSoloRun(next);
+        soloRunRef.current = next; setSoloRun(next);
         setSoloMessage({ text: lives <= 0 ? "TERMINÉ" : "RATÉ !", made: false, at: Date.now() });
       }
       window.setTimeout(() => {
@@ -297,7 +299,6 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
           if (soloActive) finishSolo(snapshot.made);
           else void resolveDuel();
         }, snapshot.made ? 260 : 120);
-        window.setTimeout(() => setBall(restBall()), 720);
         return;
       }
       raf = requestAnimationFrame(animate);
@@ -327,7 +328,7 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
   const startSolo = () => {
     const startedAt = Date.now();
     const next = { active: true, lives: soloLivesTotal, score: 0, streak: 0, gameover: false, startedAt, endsAt: soloTimeLimitSec > 0 ? startedAt + soloTimeLimitSec * 1000 : null };
-    setSoloRun(next); soloRunRef.current = next;
+    setSoloRun(next); soloRunRef.current = next; resolvedShotsRef.current.clear();
     setSoloShot(null); setSoloMessage(null); setFocusSuppressed(false); setAimState(null);
     setBall(restBall());
   };
@@ -341,7 +342,7 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
     try {
       setBusy(true); setError(""); setFocusSuppressed(false); setAimState(null);
       const data = await post({ action: "start", code: room.code, opponentId });
-      setGame(data.game as Game);
+      resolvedShotsRef.current.clear(); setGame(data.game as Game);
       setBall(restBall());
     } catch (actionError) { setError(actionError instanceof Error ? actionError.message : "Impossible de lancer Dunkshot."); }
     finally { setBusy(false); }
@@ -363,14 +364,21 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
       : 0;
     const actualAim = clamp(aim + maxPowerDrift, -1, 1);
     if (soloActive) {
-      const shot: Shot = { id: `solo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, shooterId: user.id, power, aim: actualAim, startedAt: Date.now() + 70 };
+      const shot: Shot = { id: `solo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, shooterId: user.id, power, aim: actualAim, startedAt: Date.now() + 35 };
       setSoloShot(shot);
       return;
     }
+    const shotId = `dunk-${user.id}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const startedAt = Date.now() + 45;
+    const optimistic: Shot = { id: shotId, shooterId: user.id, power, aim: actualAim, startedAt };
+    setGame((current) => current ? { ...current, shot: optimistic, lastResult: null } : current);
     try {
-      const data = await post({ action: "shoot", code: room.code, power, aim: actualAim });
+      const data = await post({ action: "shoot", code: room.code, power, aim: actualAim, shotId, startedAt });
       setGame(data.game as Game);
-    } catch (actionError) { setError(actionError instanceof Error ? actionError.message : "Tir impossible."); }
+    } catch (actionError) {
+      setGame((current) => current?.shot?.id === shotId ? { ...current, shot: null } : current);
+      setError(actionError instanceof Error ? actionError.message : "Tir impossible.");
+    }
   };
 
   const normalizedPointer = (event: PointerEvent<HTMLDivElement>) => {
@@ -391,7 +399,10 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
   const pointerMove = (event: PointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current; if (!drag || drag.pointerId !== event.pointerId) return;
     const point = normalizedPointer(event); if (!point) return;
-    const power = clamp((point.y - drag.startY) / 0.30, 0, 1);
+    const availablePull = Math.max(0.10, Math.min(0.30, 1.02 - drag.startY));
+    const rawPower = clamp((point.y - drag.startY) / availablePull, 0, 1);
+    const atScreenEdge = event.clientY >= window.innerHeight - 20;
+    const power = atScreenEdge && point.y > drag.startY + 0.035 ? 1 : rawPower;
     const aim = clamp((drag.startX - point.x) / 0.24, -1, 1);
     setAimState({ power, aim });
   };

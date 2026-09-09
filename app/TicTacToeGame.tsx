@@ -23,15 +23,14 @@ type Game = {
 const DIFFICULTY_LABEL: Record<BotDifficulty, string> = { easy: "Facile", normal: "Normal", hard: "Difficile" };
 
 async function post(payload: Record<string, unknown>) {
-  const response = await fetch("/api/game-room", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    cache: "no-store",
-  });
-  const data = await response.json();
-  if (!response.ok || !data.ok) throw new Error(data.error || "Morpion indisponible.");
-  return data;
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 5500);
+  try {
+    const response = await fetch("/api/game-room", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), cache: "no-store", signal: controller.signal });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || "Morpion indisponible.");
+    return data;
+  } finally { window.clearTimeout(timeout); }
 }
 
 export default function TicTacToeGame({ room }: { room: RoomState }) {
@@ -171,7 +170,7 @@ export default function TicTacToeGame({ room }: { room: RoomState }) {
       </>}
       {game.status === "playing" && <small>{game.mySymbol ? `Tu joues ${game.mySymbol}` : "Tu regardes la partie en spectateur"}</small>}
       {game.status === "gameover" && (isHost
-        ? <button className="primaryButton" disabled={busy} onClick={() => void action("tttReset")}>Nouvelle partie</button>
+        ? <button className="primaryButton" disabled={busy} onClick={() => void action("tttStart", { fillBots: game.botO, botDifficulty: game.botDifficulty })}>↻ Rejouer</button>
         : <small>En attente de l'hôte pour rejouer…</small>)}
     </div>
 

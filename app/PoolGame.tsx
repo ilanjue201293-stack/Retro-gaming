@@ -158,10 +158,14 @@ function advanceSimulation(simulation: Simulation, seconds: number) {
 }
 
 async function post(payload: Record<string, unknown>) {
-  const response = await fetch("/api/pool", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), cache: "no-store" });
-  const data = await response.json();
-  if (!response.ok || !data.ok) throw new Error(data.error || "Erreur Billard.");
-  return data;
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 6500);
+  try {
+    const response = await fetch("/api/pool", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), cache: "no-store", signal: controller.signal });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || "Erreur Billard.");
+    return data;
+  } finally { window.clearTimeout(timeout); }
 }
 
 export default function PoolGame({ room, user }: { room: Room; user: User }) {

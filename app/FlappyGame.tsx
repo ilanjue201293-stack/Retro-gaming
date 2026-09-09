@@ -15,15 +15,16 @@ export default function FlappyGame() {
   const [status, setStatus] = useState<Status>("lobby");
   const [score, setScore] = useState(0);
   const [best, setBest] = useState(0);
+  const scoreRef = useRef(0);
 
   const resetWorld = useCallback(() => {
     birdY.current = 0.5; velocity.current = 0; last.current = performance.now();
     pipes.current = [{ x: 1.05, gap: 0.43, passed: false }, { x: 1.62, gap: 0.58, passed: false }, { x: 2.19, gap: 0.36, passed: false }];
-    setScore(0);
+    scoreRef.current = 0; setScore(0);
   }, []);
   const start = useCallback(() => { resetWorld(); setStatus("playing"); }, [resetWorld]);
   const lobby = useCallback(() => { cancelAnimationFrame(rafRef.current); resetWorld(); setStatus("lobby"); }, [resetWorld]);
-  const finish = useCallback(() => { setStatus("gameover"); setBest((current) => Math.max(current, score)); }, [score]);
+  const finish = useCallback(() => { setStatus("gameover"); setBest((current) => Math.max(current, scoreRef.current)); }, []);
   const jump = useCallback(() => { if (status === "lobby" || status === "gameover") { start(); velocity.current = -0.62; } else velocity.current = -0.62; }, [status, start]);
 
   useEffect(() => {
@@ -62,12 +63,12 @@ export default function FlappyGame() {
         birdY.current += velocity.current * dt;
         for (const pipe of pipes.current) pipe.x -= 0.35 * dt;
         for (const pipe of pipes.current) {
-          if (!pipe.passed && pipe.x < 0.22) { pipe.passed = true; setScore((value) => value + 1); }
+          if (!pipe.passed && pipe.x < 0.22) { pipe.passed = true; scoreRef.current += 1; setScore(scoreRef.current); }
           if (pipe.x < -0.14) { const maxX = Math.max(...pipes.current.map((p) => p.x)); pipe.x = maxX + 0.57; pipe.gap = 0.27 + Math.random() * 0.46; pipe.passed = false; }
         }
         const birdR = 0.034, pipeW = 0.105, gapSize = 0.29;
         const hitPipe = pipes.current.some((pipe) => Math.abs(pipe.x - 0.22) < pipeW / 2 + birdR && (birdY.current < pipe.gap - gapSize / 2 + birdR || birdY.current > pipe.gap + gapSize / 2 - birdR));
-        if (birdY.current < birdR || birdY.current > 1 - birdR || hitPipe) { setBest((value) => Math.max(value, score)); setStatus("gameover"); }
+        if (birdY.current < birdR || birdY.current > 1 - birdR || hitPipe) { setBest((value) => Math.max(value, scoreRef.current)); setStatus("gameover"); }
       }
 
       const sky = ctx.createLinearGradient(0,0,0,h); sky.addColorStop(0,"#61c9ff"); sky.addColorStop(1,"#d9f6ff"); ctx.fillStyle = sky; ctx.fillRect(0,0,w,h);
@@ -81,7 +82,7 @@ export default function FlappyGame() {
     };
     rafRef.current = requestAnimationFrame(draw);
     return () => { alive = false; cancelAnimationFrame(rafRef.current); };
-  }, [status, score]);
+  }, [status]);
 
   const pointer = (event: PointerEvent<HTMLCanvasElement>) => { event.preventDefault(); jump(); };
   return <section className="miniGameCard flappyGame"><div className="miniGameTop"><div><span className="kicker">ARCADE · SOLO</span><h2>Flappy</h2></div><div className="flappyStats"><span><small>SCORE</small><strong>{score}</strong></span><span><small>RECORD</small><strong>{best}</strong></span></div></div><canvas ref={canvasRef} className="flappyCanvas" onPointerDown={pointer}/><div className="miniGameActions"><button className="primaryButton" onClick={start}>↻ Rejouer</button><button className="secondaryButton" onClick={lobby}>Lobby du jeu</button></div></section>;

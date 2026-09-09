@@ -56,8 +56,9 @@ const LEFT_BOARD = 0.03;
 const RIGHT_BOARD = 0.97;
 const TOP_BOARD = 0.045;
 const BOTTOM_BOARD = 0.955;
-const GOAL_MIN = 0.28;
-const GOAL_MAX = 0.72;
+const GOAL_MIN = 0.25;
+const GOAL_MAX = 0.75;
+const CORNER_CUT = 0.075;
 const MAX_PUCK_SPEED = 1.45;
 const MAX_MALLET_SPEED = 1.85;
 const INTERNAL_MAX_SCORE = 30;
@@ -208,6 +209,44 @@ function collidePuckWithPaddle(frame: Frame, oldPuck: Puck, oldPaddle: Paddle, p
   }
 }
 
+function reflectRinkBoundary(puck: Puck) {
+  const restitution = 0.96;
+  const topY = TOP_BOARD + PUCK_R, bottomY = BOTTOM_BOARD - PUCK_R;
+  const leftX = LEFT_BOARD + PUCK_R, rightX = RIGHT_BOARD - PUCK_R;
+  const straightLeft = LEFT_BOARD + CORNER_CUT;
+  const straightRight = RIGHT_BOARD - CORNER_CUT;
+  const straightTop = TOP_BOARD + CORNER_CUT;
+  const straightBottom = BOTTOM_BOARD - CORNER_CUT;
+
+  if (puck.x >= straightLeft && puck.x <= straightRight) {
+    if (puck.y < topY) { puck.y = topY; if (puck.vy < 0) puck.vy = -puck.vy * restitution; }
+    else if (puck.y > bottomY) { puck.y = bottomY; if (puck.vy > 0) puck.vy = -puck.vy * restitution; }
+  }
+  const inGoalMouth = puck.y > GOAL_MIN && puck.y < GOAL_MAX;
+  if (!inGoalMouth && puck.y >= straightTop && puck.y <= straightBottom) {
+    if (puck.x < leftX) { puck.x = leftX; if (puck.vx < 0) puck.vx = -puck.vx * restitution; }
+    else if (puck.x > rightX) { puck.x = rightX; if (puck.vx > 0) puck.vx = -puck.vx * restitution; }
+  }
+
+  const inv = Math.SQRT1_2;
+  const corners = [
+    { d: ((puck.x - LEFT_BOARD) + (puck.y - TOP_BOARD) - CORNER_CUT) * inv, nx: inv, ny: inv },
+    { d: ((RIGHT_BOARD - puck.x) + (puck.y - TOP_BOARD) - CORNER_CUT) * inv, nx: -inv, ny: inv },
+    { d: ((puck.x - LEFT_BOARD) + (BOTTOM_BOARD - puck.y) - CORNER_CUT) * inv, nx: inv, ny: -inv },
+    { d: ((RIGHT_BOARD - puck.x) + (BOTTOM_BOARD - puck.y) - CORNER_CUT) * inv, nx: -inv, ny: -inv },
+  ];
+  for (const corner of corners) {
+    if (corner.d >= PUCK_R) continue;
+    const push = PUCK_R - corner.d;
+    puck.x += corner.nx * push; puck.y += corner.ny * push;
+    const velocityIntoWall = puck.vx * corner.nx + puck.vy * corner.ny;
+    if (velocityIntoWall < 0) {
+      puck.vx -= (1 + restitution) * velocityIntoWall * corner.nx;
+      puck.vy -= (1 + restitution) * velocityIntoWall * corner.ny;
+    }
+  }
+}
+
 function stepSimulation(simulation: Simulation, players: Player[], mode: Mode, dt: number) {
   const frame = simulation.frame;
   const steps = Math.max(1, Math.min(10, Math.ceil(dt / 0.0045)));
@@ -234,15 +273,12 @@ function stepSimulation(simulation: Simulation, players: Player[], mode: Mode, d
     const oldPuck = { ...frame.puck };
     frame.puck.x += frame.puck.vx * stepDt; frame.puck.y += frame.puck.vy * stepDt;
     const friction = Math.pow(0.994, stepDt * 60); frame.puck.vx *= friction; frame.puck.vy *= friction;
-    if (frame.puck.y - PUCK_R < TOP_BOARD) { frame.puck.y = TOP_BOARD + PUCK_R; frame.puck.vy = Math.abs(frame.puck.vy) * 0.96; }
-    if (frame.puck.y + PUCK_R > BOTTOM_BOARD) { frame.puck.y = BOTTOM_BOARD - PUCK_R; frame.puck.vy = -Math.abs(frame.puck.vy) * 0.96; }
-    const inGoalMouth = frame.puck.y > GOAL_MIN && frame.puck.y < GOAL_MAX;
-    if (!inGoalMouth && frame.puck.x - PUCK_R < LEFT_BOARD) { frame.puck.x = LEFT_BOARD + PUCK_R; frame.puck.vx = Math.abs(frame.puck.vx) * 0.96; }
-    if (!inGoalMouth && frame.puck.x + PUCK_R > RIGHT_BOARD) { frame.puck.x = RIGHT_BOARD - PUCK_R; frame.puck.vx = -Math.abs(frame.puck.vx) * 0.96; }
+    reflectRinkBoundary(frame.puck);
     for (const player of players) {
       const paddle = frame.paddles[player.userId];
       collidePuckWithPaddle(frame, oldPuck, oldPaddles[player.userId] ?? paddle, paddle, player.side, stepDt);
     }
+    reflectRinkBoundary(frame.puck);
     const goalNow = frame.puck.y > GOAL_MIN && frame.puck.y < GOAL_MAX;
     if (goalNow && frame.puck.x < -0.01) {
       frame.rightScore += 1;
@@ -258,12 +294,9 @@ function stepSimulation(simulation: Simulation, players: Player[], mode: Mode, d
 
 function predictPuck(puck: Puck, ageSeconds: number) {
   const dt = Math.min(ageSeconds, 0.24);
-  let x = puck.x + puck.vx * dt, y = puck.y + puck.vy * dt, vx = puck.vx, vy = puck.vy;
-  const minY = TOP_BOARD + PUCK_R, maxY = BOTTOM_BOARD - PUCK_R, minX = LEFT_BOARD + PUCK_R, maxX = RIGHT_BOARD - PUCK_R;
-  if (y < minY) { y = minY + (minY - y); vy = Math.abs(vy); } else if (y > maxY) { y = maxY - (y - maxY); vy = -Math.abs(vy); }
-  const inGoalMouth = y > GOAL_MIN && y < GOAL_MAX;
-  if (!inGoalMouth) { if (x < minX) { x = minX + (minX - x); vx = Math.abs(vx); } else if (x > maxX) { x = maxX - (x - maxX); vx = -Math.abs(vx); } }
-  return { x: clamp(x, -0.04, 1.04), y: clamp(y, TOP_BOARD, BOTTOM_BOARD), vx, vy };
+  const predicted: Puck = { x: puck.x + puck.vx * dt, y: puck.y + puck.vy * dt, vx: puck.vx, vy: puck.vy };
+  reflectRinkBoundary(predicted);
+  return { ...predicted, x: clamp(predicted.x, -0.04, 1.04), y: clamp(predicted.y, TOP_BOARD, BOTTOM_BOARD) };
 }
 
 function updateHockeyBots(simulation: Simulation, game: Game, now: number) {

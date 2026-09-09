@@ -6,7 +6,7 @@ export const GAME_REGISTRY = [
   { key: "pool", label: "Billard", icon: "🎱", meta: "8-BALL · SOLO / 1V1", description: "Billard physique avec pleines, rayées, bots et vraie visée." },
   { key: "tictactoe", label: "Morpion (Tic-Tac-Toe)", icon: "❌⭕", meta: "CLASSIQUE · 2 JOUEURS", description: "Aligne trois symboles avant ton adversaire, ou joue contre un bot." },
   { key: "higherlower", label: "Le Plus ou Moins", icon: "🔢", meta: "LOGIQUE · SOLO", description: "Le programme choisit un nombre : trouve-le grâce aux indices plus ou moins." },
-  { key: "hangman", label: "Le Pendu", icon: "📝", meta: "MOTS · SOLO", description: "Retrouve le mot secret lettre par lettre avant d'épuiser tes essais." },
+  { key: "hangman", label: "Le Pendu", icon: "📝", meta: "MOTS · MULTI", description: "Proposez lettres ou mot entier chacun votre tour, avec un nombre d'essais réglable." },
   { key: "flappy", label: "Flappy", icon: "🐤", meta: "ARCADE · SOLO", description: "Saute au bon moment et traverse un maximum de tuyaux sans collision." },
 ] as const;
 

@@ -14,10 +14,9 @@ const ICE_SERVERS:RTCIceServer[]=[
 ];
 
 async function post(path:string,payload:Record<string,unknown>){
-  const res=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),cache:"no-store"});
-  const data=await res.json();
-  if(!res.ok||!data.ok)throw new Error(data.error||"Erreur.");
-  return data;
+  const controller=new AbortController();const timeout=window.setTimeout(()=>controller.abort(),5000);
+  try{const res=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),cache:"no-store",signal:controller.signal});const data=await res.json();if(!res.ok||!data.ok)throw new Error(data.error||"Erreur.");return data}
+  finally{window.clearTimeout(timeout)}
 }
 
 function RemoteAudio({stream}:{stream:MediaStream}){

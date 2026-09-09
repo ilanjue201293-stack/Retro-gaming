@@ -1,6 +1,6 @@
 .hockeyMallet{width:9.8%}
-.goal{top:33%;height:34%}
-.goalCrease{top:31%;height:38%;width:12%}
+.goal{top:25%;height:50%}
+.goalCrease{top:22%;height:56%;width:13%}
 .hockeyCountdown{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:18;display:grid;place-items:center;align-content:center;width:96px;height:96px;border-radius:50%;background:rgba(5,13,21,.76);border:2px solid rgba(255,255,255,.72);box-shadow:0 10px 34px rgba(0,0,0,.28);pointer-events:none;color:#fff}
 .hockeyCountdown b{font-size:42px;line-height:.9;font-variant-numeric:tabular-nums}.hockeyCountdown span{margin-top:7px;font-size:8px;font-weight:950;letter-spacing:.16em;color:#dceaf2}
 .hockeyRuleSettings{display:flex;gap:10px;flex-wrap:wrap;padding:2px 0}.hockeyRuleSettings label{display:grid;gap:5px}.hockeyRuleSettings small{font-size:8px;font-weight:900;letter-spacing:.08em;color:#83909c;text-transform:uppercase}.hockeyRuleSettings select{height:34px;border:1px solid #33404d;border-radius:9px;background:#111820;color:#dce4e9;padding:0 28px 0 10px;font-size:10px;font-weight:800}.hockeyRuleSettings select:disabled{opacity:.58}.hockeyMatchRules{height:32px;display:flex;align-items:center;justify-content:center;gap:18px;color:#758493;font-size:9px;font-weight:900;letter-spacing:.1em;text-transform:uppercase}.hockeyMatchRules strong{font-size:13px;color:#edf2f5}.hockeyMatchRules strong.sudden{color:#ffcf67;letter-spacing:.14em}

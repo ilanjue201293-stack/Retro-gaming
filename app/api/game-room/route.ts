@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { ensureGameRoomSchema, ensureTicTacToeRow, isRoomGameKey } from "@/lib/game-room";
+import { ensureGameRoomSchema, ensureHangmanRow, ensureTicTacToeRow, isRoomGameKey } from "@/lib/game-room";
 import { requireRoomMember } from "@/lib/room";
 import { cleanRoomCode } from "@/lib/utils";
 
@@ -76,9 +76,22 @@ function botMove(board: Board, level: BotDifficulty) {
   return randomChoice(free);
 }
 
+async function resetActiveGames(code: string) {
+  const queries = [
+    `update retro_hockey_games set status='lobby',players='[]'::jsonb,left_score=0,right_score=0,winner_side=null,updated_at=now() where room_code=$1`,
+    `update retro_pong_games set status='lobby',players='[]'::jsonb,left_score=0,right_score=0,winner_side=null,started_at=null,updated_at=now() where room_code=$1`,
+    `update retro_rps_games set status='lobby',players='[]'::jsonb,round_index=0,left_score=0,right_score=0,choices='{}'::jsonb,phase='choosing',phase_started_at=null,phase_ends_at=null,last_result=null,winner_side=null,updated_at=now() where room_code=$1`,
+    `update retro_dunkshot_games set status='lobby',players='[]'::jsonb,lives='{}'::jsonb,turn_index=0,streak=0,shot=null,last_result=null,winner_id=null,started_at=null,ends_at=null,updated_at=now() where room_code=$1`,
+    `update retro_pool_games set status='lobby',players='[]'::jsonb,turn_index=0,groups='{}'::jsonb,shot=null,winner_id=null,last_message=null,updated_at=now() where room_code=$1`,
+    `update retro_tictactoe_games set status='lobby',player_x_id=null,player_o_id=null,bot_o=false,board='["","","","","","","","",""]'::jsonb,turn='X',winner=null,updated_at=now() where room_code=$1`,
+    `update retro_hangman_games set status='lobby',players='[]'::jsonb,word='',guessed_letters='[]'::jsonb,wrong_words='[]'::jsonb,errors=0,turn_index=0,won=null,last_action=null,updated_at=now() where room_code=$1`,
+  ];
+  await Promise.all(queries.map((query) => db().query(query, [code]).catch(() => undefined)));
+}
+
 async function roomState(code: string, userId: string) {
-  const room = await db().query<{ host_user_id: string; current_game: string }>(
-    `select host_user_id,current_game from retro_rooms where code=$1 and expires_at>now() limit 1`,
+  const room = await db().query<{ host_user_id: string; current_game: string; game_control_seq: string; game_control_action: string | null; game_control_game: string | null }>(
+    `select host_user_id,current_game,game_control_seq::text,game_control_action,game_control_game from retro_rooms where code=$1 and expires_at>now() limit 1`,
     [code]
   );
   if (!room.rows[0]) throw new Error("Room introuvable ou expirée.");
@@ -95,6 +108,9 @@ async function roomState(code: string, userId: string) {
     currentGame: isRoomGameKey(room.rows[0].current_game) ? room.rows[0].current_game : "hockey",
     members: members.rows,
     userId,
+    gameControlSeq: Number(room.rows[0].game_control_seq || 0),
+    gameControlAction: room.rows[0].game_control_action,
+    gameControlGame: room.rows[0].game_control_game,
   };
 }
 
@@ -155,8 +171,20 @@ export async function POST(req: NextRequest) {
       const game = data.game;
       if (!isRoomGameKey(game)) throw new Error("Jeu inconnu.");
       if (membership.host_user_id !== user.id) throw new Error("Seul l'hôte peut changer de jeu.");
+      await resetActiveGames(code);
       await db().query(`update retro_rooms set current_game=$1,updated_at=now() where code=$2`, [game, code]);
       if (game === "tictactoe") await ensureTicTacToeRow(code);
+      if (game === "hangman") await ensureHangmanRow(code);
+      return NextResponse.json({ ok: true, room: await roomState(code, user.id) });
+    }
+
+    if (action === "localControl") {
+      if (membership.host_user_id !== user.id) throw new Error("Seul l'hôte peut contrôler la partie.");
+      const control = String(data.control ?? "");
+      if (!["replay", "lobby", "end"].includes(control)) throw new Error("Commande de jeu invalide.");
+      const current = await roomState(code, user.id);
+      if (current.currentGame !== "higherlower" && current.currentGame !== "flappy") throw new Error("Ce jeu utilise ses propres contrôles réseau.");
+      await db().query(`update retro_rooms set game_control_seq=game_control_seq+1,game_control_action=$1,game_control_game=$2,updated_at=now() where code=$3`, [control, current.currentGame, code]);
       return NextResponse.json({ ok: true, room: await roomState(code, user.id) });
     }
 

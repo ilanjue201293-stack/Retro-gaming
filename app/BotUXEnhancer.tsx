@@ -54,7 +54,7 @@ export default function BotUXEnhancer() {
     };
     syncDom();
     const observer = new MutationObserver(syncDom);
-    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    observer.observe(document.body, { childList: true, subtree: true });
     return () => observer.disconnect();
   }, []);
 
@@ -76,8 +76,10 @@ export default function BotUXEnhancer() {
       }
     };
     void refresh();
-    const timer = window.setInterval(refresh, 1000);
-    return () => { alive = false; window.clearInterval(timer); };
+    const onRoomState = (event: Event) => { if (alive) setRoom((event as CustomEvent<RoomState>).detail); };
+    window.addEventListener("retro:room-state", onRoomState as EventListener);
+    const timer = window.setInterval(refresh, 5000);
+    return () => { alive = false; window.clearInterval(timer); window.removeEventListener("retro:room-state", onRoomState as EventListener); };
   }, []);
 
   useEffect(() => {

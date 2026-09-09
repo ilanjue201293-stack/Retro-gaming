@@ -7,6 +7,7 @@ import PongGame from "./PongGame";
 import RpsGame from "./RpsGame";
 import DunkshotGame from "./DunkshotGame";
 import PoolGame from "./PoolGame";
+import { GAME_REGISTRY, GameKey } from "./gameRegistry";
 
 type User = { id: string; username: string };
 type Friend = { id: string; username: string; online: boolean };
@@ -15,18 +16,20 @@ type Invite = { id: string; room_code: string; sender_name: string; created_at: 
 type SocialState = { friends: Friend[]; incoming: Request[]; outgoing: Request[]; roomInvites: Invite[] };
 type RoomMember = { id: string; username: string; online: boolean; joined_at: string };
 type Room = { code: string; hostId: string; members: RoomMember[] };
-type RoomGameKey = "hockey" | "pong" | "rps" | "dunkshot" | "pool" | "tictactoe" | "higherlower" | "hangman" | "flappy";
+type RoomGameKey = GameKey;
 
 async function post(path: string, payload: Record<string, unknown>) {
-  const res = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    cache: "no-store",
-  });
-  const data = await res.json();
-  if (!res.ok || !data.ok) throw new Error(data.error || "Erreur.");
-  return data;
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 7000);
+  try {
+    const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), cache: "no-store", signal: controller.signal });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || "Erreur.");
+    return data;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw new Error("Le serveur met trop de temps à répondre. Réessaie.");
+    throw error;
+  } finally { window.clearTimeout(timeout); }
 }
 
 const ROOM_KEY = "retro-active-room";
@@ -182,10 +185,12 @@ export default function RetroApp() {
     } catch (err) { setError(err instanceof Error ? err.message : "Erreur."); }
   };
 
-  const createRoom = async () => {
+  const createRoom = async (game: RoomGameKey = "hockey") => {
     try {
       setRoomBusy(true); setError("");
       const data = await post("/api/rooms", { action: "create" });
+      if (game !== "hockey") await post("/api/game-room", { action: "setGame", code: data.room.code, game });
+      setSelectedRoomGame(game);
       setRoom(data.room);
       setHockeyActive(false);
       localStorage.setItem(ROOM_KEY, data.room.code);
@@ -331,32 +336,12 @@ export default function RetroApp() {
           <div className="actionCard"><span>⌁</span><h3>Rejoindre avec un code</h3><p>Entre le code à 5 caractères envoyé par un ami.</p><form onSubmit={(event) => { event.preventDefault(); void joinRoom(); }}><input className="codeInput" value={joinCode} maxLength={5} onChange={(event) => setJoinCode(event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ""))} placeholder="ABCDE"/><button className="secondaryButton" disabled={roomBusy || joinCode.length !== 5}>Rejoindre</button></form></div>
         </div>
         <section className="gamesPreview">
-          <div className="panelHead"><div><span className="kicker">JEUX</span><h2>Bibliothèque</h2></div><span className="availablePill">4 JEUX</span></div>
-          <div className="gameLibraryCard">
-            <div className="gameLibraryIcon">🏒</div>
-            <div><small>ARCADE · MULTIJOUEUR</small><h3>Hockey Arcade</h3><p>Hockey vu du dessus avec palet physique. Joue en 1v1, 2v1 ou 2v2, choisis les équipes et complète avec des bots.</p></div>
-            <button className="primaryButton" disabled={roomBusy} onClick={() => void createRoom()}>Créer une room</button>
-          </div>
-          <div className="gameLibraryCard">
-            <div className="gameLibraryIcon pongMiniIcon"><i/></div>
-            <div><small>CLASSIQUE · 2 JOUEURS</small><h3>Pong</h3><p>Le Pong classique : deux raquettes verticales, une balle carrée et un duel en 1 contre 1.</p></div>
-            <button className="primaryButton" disabled={roomBusy} onClick={() => void createRoom()}>Créer une room</button>
-          </div>
-          <div className="gameLibraryCard">
-            <div className="gameLibraryIcon rpsMiniIcon">✊ ✋ ✌️</div>
-            <div><small>DUEL · 2 JOUEURS</small><h3>Pierre · Feuille · Ciseaux</h3><p>3 secondes pour choisir, puis Pierre, Feuille, Ciseaux et révélation simultanée.</p></div>
-            <button className="primaryButton" disabled={roomBusy} onClick={() => void createRoom()}>Créer une room</button>
-          </div>
-          <div className="gameLibraryCard">
-            <div className="gameLibraryIcon dunkMiniIcon">🏀</div>
-            <div><small>ARCADE · SOLO / 1V1</small><h3>Dunkshot</h3><p>Charge ton tir en tirant vers le bas, vise avec l'angle et enchaîne les paniers. Le panier devient mobile quand ta série monte.</p></div>
-            <button className="primaryButton" disabled={roomBusy} onClick={() => void createRoom()}>Créer une room</button>
-          </div>
-          <div className="gameLibraryCard">
-            <div className="gameLibraryIcon poolMiniIcon">🎱</div>
-            <div><small>BILLARD · SOLO / 1V1</small><h3>Billard</h3><p>Vraie table 8-ball arcade : collisions, bandes, poches, puissance et duel pleines contre rayées.</p></div>
-            <button className="primaryButton" disabled={roomBusy} onClick={() => void createRoom()}>Créer une room</button>
-          </div>
+          <div className="panelHead"><div><span className="kicker">JEUX</span><h2>Bibliothèque</h2></div><span className="availablePill">{GAME_REGISTRY.length} JEUX</span></div>
+          {GAME_REGISTRY.map((game) => <div className="gameLibraryCard" data-game-library={game.key} key={game.key}>
+            <div className={`gameLibraryIcon ${game.key === "dunkshot" ? "dunkMiniIcon" : game.key === "pool" ? "poolMiniIcon" : ""}`}>{game.icon}</div>
+            <div><small>{game.meta}</small><h3>{game.label}</h3><p>{game.description}</p></div>
+            <button className="primaryButton" disabled={roomBusy} onClick={() => void createRoom(game.key)}>Créer une room</button>
+          </div>)}
         </section>
       </section>
       <aside className="socialColumn">
