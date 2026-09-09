@@ -18,14 +18,18 @@ type Game = {
   shot: Shot | null;
   lastResult: LastResult | null;
   winnerId: string | null;
+  timeLimitSec: number;
+  startedAt: number | null;
+  endsAt: number | null;
 };
 type AimState = { power: number; aim: number };
 type BallVisual = { x: number; y: number; rotation: number; visible: boolean; inside: boolean; bounceCount: number };
-type SoloRun = { active: boolean; lives: number; score: number; streak: number; gameover: boolean };
+type SoloRun = { active: boolean; lives: number; score: number; streak: number; gameover: boolean; startedAt: number; endsAt: number | null };
 type HoopPosition = { x: number; y: number; moving: boolean };
 type ShotSnapshot = BallVisual & { made: boolean; done: boolean };
 
 const LIVES_OPTIONS = [1, 2, 3, 5, 7, 10];
+const TIME_OPTIONS = [0, 30, 60, 90, 120, 180, 300];
 const BALL_START_X = 0.5;
 const BALL_START_Y = 0.86;
 const GRAVITY = 2.05;
@@ -38,6 +42,8 @@ const FLOOR_Y = 0.94;
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const restBall = (): BallVisual => ({ x: BALL_START_X, y: BALL_START_Y, rotation: 0, visible: true, inside: false, bounceCount: 0 });
+const formatClock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.max(0, seconds % 60)).padStart(2, "0")}`;
+const timeLabel = (seconds: number) => seconds === 0 ? "Désactivé" : seconds < 60 ? `${seconds}s` : `${seconds / 60} min`;
 
 async function post(payload: Record<string, unknown>) {
   const response = await fetch("/api/dunkshot", {
@@ -74,6 +80,7 @@ function simulateShot(power: number, aim: number, elapsed: number, startedAt: nu
   let floorBounces = 0;
   let t = 0;
   const end = clamp(elapsed, 0, 2.7);
+  const shotHoop = hoopPosition(streak, startedAt);
 
   while (t < end) {
     const dt = Math.min(PHYSICS_STEP, end - t);
@@ -83,7 +90,7 @@ function simulateShot(power: number, aim: number, elapsed: number, startedAt: nu
     y += vy * dt;
     rotation += (260 + Math.abs(vx) * 920) * dt * (vx < -0.01 ? -1 : 1);
 
-    const hoop = hoopPosition(streak, startedAt + (t + dt) * 1000);
+    const hoop = shotHoop;
     const rimY = hoop.y + RIM_Y_OFFSET;
 
     if (!made && floorBounces === 0 && previousY < rimY && y >= rimY && vy > 0 && Math.abs(x - hoop.x) < SCORE_HALF) {
@@ -97,7 +104,7 @@ function simulateShot(power: number, aim: number, elapsed: number, startedAt: nu
       vx *= Math.pow(0.5, dt);
     }
 
-    if (!made && floorBounces === 0) {
+    if (!made && floorBounces === 0 && vy > 0) {
       for (const rimX of [hoop.x - RIM_HALF, hoop.x + RIM_HALF]) {
         const dx = x - rimX;
         const dy = y - rimY;
@@ -154,6 +161,7 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<"solo" | "duel">("solo");
   const [soloLivesTotal, setSoloLivesTotal] = useState(3);
+  const [soloTimeLimitSec, setSoloTimeLimitSec] = useState(0);
   const [soloRun, setSoloRun] = useState<SoloRun | null>(null);
   const [soloShot, setSoloShot] = useState<Shot | null>(null);
   const [selectedOpponent, setSelectedOpponent] = useState("");
@@ -180,9 +188,19 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
   const canShoot = canShootSolo || canShootDuel;
   const activeShot = soloActive ? soloShot : game?.shot ?? null;
   const activeStreak = soloActive ? soloRun?.streak ?? 0 : game?.streak ?? 0;
-  const hoop = hoopPosition(activeStreak, sceneTime);
+  const hoop = activeShot ? hoopPosition(activeStreak, activeShot.startedAt) : hoopPosition(activeStreak, sceneTime);
 
   useEffect(() => { soloRunRef.current = soloRun; }, [soloRun]);
+
+  useEffect(() => {
+    const current = soloRunRef.current;
+    if (!current?.active || current.gameover || !current.endsAt || sceneTime < current.endsAt || soloShot) return;
+    const next = { ...current, gameover: true };
+    soloRunRef.current = next;
+    setSoloRun(next);
+    setAimState(null);
+    setSoloMessage({ text: "TEMPS ÉCOULÉ", made: false, at: Date.now() });
+  }, [sceneTime, soloShot]);
 
   useEffect(() => {
     if (!opponents.length) { setSelectedOpponent(""); return; }
@@ -298,17 +316,18 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
     }
   }, [game?.lastResult?.shotId]);
 
-  const configureLives = async (livesTotal: number) => {
+  const configureSettings = async (livesTotal: number, timeLimitSec: number) => {
     try {
       setBusy(true); setError("");
-      const data = await post({ action: "configure", code: room.code, livesTotal });
+      const data = await post({ action: "configure", code: room.code, livesTotal, timeLimitSec });
       setGame(data.game as Game);
     } catch (actionError) { setError(actionError instanceof Error ? actionError.message : "Erreur."); }
     finally { setBusy(false); }
   };
 
   const startSolo = () => {
-    const next = { active: true, lives: soloLivesTotal, score: 0, streak: 0, gameover: false };
+    const startedAt = Date.now();
+    const next = { active: true, lives: soloLivesTotal, score: 0, streak: 0, gameover: false, startedAt, endsAt: soloTimeLimitSec > 0 ? startedAt + soloTimeLimitSec * 1000 : null };
     setSoloRun(next); soloRunRef.current = next;
     setSoloShot(null); setSoloMessage(null); setFocusSuppressed(false); setAimState(null);
     setBall(restBall());
@@ -398,10 +417,12 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
       {tab === "solo" ? <div className="dunkSetupPanel">
         <div><strong>Mode survie</strong><small>À partir de 2 paniers d'affilée, le panier commence à bouger. Plus ta série monte, plus ça accélère.</small></div>
         <label><span>Vies</span><select value={soloLivesTotal} onChange={(event) => setSoloLivesTotal(Number(event.target.value))}>{LIVES_OPTIONS.map((value) => <option key={value} value={value}>{value} vie{value > 1 ? "s" : ""}</option>)}</select></label>
+        <label><span>Timer</span><select value={soloTimeLimitSec} onChange={(event) => setSoloTimeLimitSec(Number(event.target.value))}>{TIME_OPTIONS.map((value) => <option key={value} value={value}>{timeLabel(value)}</option>)}</select></label>
         <button className="primaryButton" onClick={startSolo}>Jouer en solo</button>
       </div> : <div className="dunkSetupPanel">
         <div><strong>Duel à élimination</strong><small>Vous tirez chacun votre tour. Un raté retire une vie. À 0 vie, c'est perdu.</small></div>
-        <label><span>Vies</span><select value={game.livesTotal} disabled={!isHost || busy} onChange={(event) => void configureLives(Number(event.target.value))}>{LIVES_OPTIONS.map((value) => <option key={value} value={value}>{value} vie{value > 1 ? "s" : ""}</option>)}</select></label>
+        <label><span>Vies</span><select value={game.livesTotal} disabled={!isHost || busy} onChange={(event) => void configureSettings(Number(event.target.value), game.timeLimitSec)}>{LIVES_OPTIONS.map((value) => <option key={value} value={value}>{value} vie{value > 1 ? "s" : ""}</option>)}</select></label>
+        <label><span>Timer</span><select value={game.timeLimitSec} disabled={!isHost || busy} onChange={(event) => void configureSettings(game.livesTotal, Number(event.target.value))}>{TIME_OPTIONS.map((value) => <option key={value} value={value}>{timeLabel(value)}</option>)}</select></label>
         {isHost ? <>
           <label><span>Adversaire</span><select value={selectedOpponent} disabled={!opponents.length || busy} onChange={(event) => setSelectedOpponent(event.target.value)}>{opponents.map((member) => <option key={member.id} value={member.id}>{member.username}</option>)}</select></label>
           <button className="primaryButton" disabled={!selectedOpponent || busy} onClick={() => void startDuel()}>{busy ? "Lancement…" : "Lancer le 1v1"}</button>
@@ -418,6 +439,12 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
   const duelGameover = game.status === "gameover";
   const instruction = activeShot ? "TIR EN COURS…" : canShoot ? "TIRE VERS LE BAS · GLISSE À L'OPPOSÉ POUR VISER" : soloActive ? "PRÉPARE TON PROCHAIN TIR" : `AU TOUR DE ${currentPlayer?.username?.toUpperCase() ?? "…"}`;
   const recentMessage = soloMessage && sceneTime - soloMessage.at < 1800 ? soloMessage : null;
+  const timerSeconds = soloActive
+    ? (soloRun?.endsAt ? Math.max(0, Math.ceil((soloRun.endsAt - sceneTime) / 1000)) : null)
+    : (game.timeLimitSec > 0 && game.endsAt ? Math.max(0, Math.ceil((game.endsAt - sceneTime) / 1000)) : null);
+  const arenaClock = timerSeconds === null ? "--:--" : formatClock(timerSeconds);
+  const homeValue = soloActive ? (soloRun?.score ?? 0) : (game.players[0] ? (game.lives[game.players[0].userId] ?? game.livesTotal) : 0);
+  const awayValue = soloActive ? (soloRun?.lives ?? 0) : (game.players[1] ? (game.lives[game.players[1].userId] ?? game.livesTotal) : 0);
   const powerClass = !aimState ? "" : aimState.power < 0.40 ? "low" : aimState.power < 0.78 ? "mid" : "high";
   const arrowStyle = aimState ? ({ height: `${105 + aimState.power * 190}px`, transform: `translateX(-50%) rotate(${aimState.aim * 34}deg)` } as CSSProperties) : undefined;
   const hoopStyle = { left: `${hoop.x * 100}%`, top: `${hoop.y * 100}%` } as CSSProperties;
@@ -442,7 +469,15 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
       <div className="dunkGymWall">
         <div className="dunkCeilingLights"><i/><i/><i/></div>
         <div className="dunkWallStripe"/>
-        <div className="dunkArenaBoard"><small>DUNKSHOT ARENA</small><strong>24</strong><span>HOME&nbsp;&nbsp;00&nbsp;&nbsp;·&nbsp;&nbsp;00&nbsp;&nbsp;AWAY</span></div>
+        <div className="dunkArenaBoard">
+          <small>DUNKSHOT ARENA</small>
+          <strong className="dunkArenaClock">{arenaClock}</strong>
+          <div className="dunkArenaScoreRow">
+            <span><b>HOME</b><em>{String(homeValue).padStart(2, "0")}</em></span>
+            <i>{timerSeconds === null ? "NO TIMER" : "TIME"}</i>
+            <span><b>AWAY</b><em>{String(awayValue).padStart(2, "0")}</em></span>
+          </div>
+        </div>
         <div className="dunkBleachers"><i/><i/><i/><i/><i/></div>
       </div>
       <div className="dunkSkyGlow"/>
@@ -458,7 +493,7 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
       {(soloGameover || duelGameover) && <div className="dunkGameOver">
         <span className="dunkTrophy">{soloGameover ? "🏀" : "🏆"}</span>
         <small>{soloGameover ? "PARTIE TERMINÉE" : "DUEL TERMINÉ"}</small>
-        <h2>{soloGameover ? `${soloRun?.score ?? 0} panier${(soloRun?.score ?? 0) > 1 ? "s" : ""}` : `${winner?.username ?? "Joueur"} gagne !`}</h2>
+        <h2>{soloGameover ? `${soloRun?.score ?? 0} panier${(soloRun?.score ?? 0) > 1 ? "s" : ""}` : winner ? `${winner.username} gagne !` : "Égalité !"}</h2>
         {soloGameover ? <div className="gameEndActions"><button className="primaryButton" onClick={startSolo}>Rejouer</button><button className="secondaryButton" onClick={exitSolo}>Lobby du jeu</button></div> : isHost ? <div className="gameEndActions"><button className="primaryButton" disabled={busy} onClick={() => void startDuel(game.players.find((player) => player.userId !== user.id)?.userId ?? selectedOpponent)}>Rejouer</button><button className="secondaryButton" disabled={busy} onClick={() => void stopDuel()}>Lobby du jeu</button></div> : <small>En attente de l'hôte…</small>}
       </div>}
     </div>

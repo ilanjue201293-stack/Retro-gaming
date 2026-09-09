@@ -666,7 +666,17 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
   };
 
   useEffect(() => {
+    const editable = (target: EventTarget | null) => {
+      const element = target as HTMLElement | null;
+      if (!element) return false;
+      return element.tagName === "INPUT" ||
+        element.tagName === "TEXTAREA" ||
+        element.tagName === "SELECT" ||
+        element.isContentEditable ||
+        Boolean(element.closest?.("[contenteditable='true']"));
+    };
     const down = (event: KeyboardEvent) => {
+      if (game?.status !== "playing" || focusSuppressed || editable(event.target)) return;
       if (!["ArrowUp", "ArrowDown", "w", "W", "s", "S"].includes(event.key)) return;
       event.preventDefault();
       if (["ArrowUp", "w", "W"].includes(event.key)) keysRef.current.up = true;
@@ -678,8 +688,12 @@ export default function PongGame({ room, user }: { room: Room; user: User }) {
     };
     window.addEventListener("keydown", down, { passive: false });
     window.addEventListener("keyup", up);
-    return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
-  }, []);
+    return () => {
+      keysRef.current = { up: false, down: false };
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+    };
+  }, [game?.status, focusSuppressed]);
 
   useEffect(() => {
     if (!game || game.status !== "playing" || !me) return;
