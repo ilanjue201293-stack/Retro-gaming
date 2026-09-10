@@ -9,6 +9,7 @@ import "./rps.css";
 import "./bots.css";
 import "./dunkshot.css";
 import "./pool.css";
+import "./football.css";
 import "./room-games.css";
 import "./mini-games.css";
 
