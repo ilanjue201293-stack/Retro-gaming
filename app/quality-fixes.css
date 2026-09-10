@@ -1,0 +1,19 @@
+/* Targeted quality fixes: keep comms clear of host game controls without changing the room layout. */
+.commsButtons{bottom:88px!important;z-index:10020!important}
+.commsPanel{bottom:146px!important;z-index:10019!important;max-height:min(520px,calc(100vh - 170px))!important}
+.messageToast{bottom:150px!important;z-index:10021!important}
+
+.numberModeActions{display:flex;gap:9px;flex-wrap:wrap;margin-top:16px}
+.numberBotPanel{max-width:620px;margin:0 auto 14px;display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px;align-items:center;border:1px solid #2d3a46;background:#0b1218;border-radius:13px;padding:10px 12px}
+.numberBotPanel>span{width:38px;height:38px;display:grid;place-items:center;border-radius:11px;background:#151f28;font-size:21px}
+.numberBotPanel>div{display:grid;gap:2px;min-width:0}.numberBotPanel small{font-size:8px;color:var(--muted);font-weight:900;letter-spacing:.12em}.numberBotPanel strong{font-size:12px}.numberBotPanel em{font-style:normal;color:#7f8d99;font-size:9px;text-align:right}
+.numberBotPanel.thinking{border-color:rgba(143,240,189,.38);box-shadow:0 0 0 2px rgba(143,240,189,.05)}
+.guessHistory .botGuess{border-color:rgba(182,163,255,.32);background:rgba(182,163,255,.08);color:#d9d0ff}
+
+@media(max-width:700px){
+  .commsButtons{bottom:78px!important;right:10px!important}
+  .commsPanel{bottom:136px!important;right:10px!important;max-height:calc(100vh - 150px)!important}
+  .messageToast{bottom:140px!important;right:10px!important}
+  .numberModeActions{display:grid;grid-template-columns:1fr}.numberModeActions button{width:100%}
+  .numberBotPanel{grid-template-columns:auto 1fr}.numberBotPanel em{grid-column:1/-1;text-align:left}
+}
