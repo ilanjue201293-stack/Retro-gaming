@@ -6,6 +6,7 @@ import TicTacToeGame from "./TicTacToeGame";
 import HigherLowerGame from "./HigherLowerGame";
 import HangmanGame from "./HangmanGame";
 import FlappyGame from "./FlappyGame";
+import FootballGame from "./FootballGame";
 import { GAME_REGISTRY, GameKey } from "./gameRegistry";
 
 type RoomMember = { id: string; username: string; online: boolean; joined_at: string };
@@ -69,7 +70,11 @@ export default function RoomGameController() {
   async function changeGame(game: GameKey) {
     if (!room || room.hostId !== room.userId || busy || game === room.currentGame) return;
     const previous = room; setBusy(true); setError(""); setRoom({ ...room, currentGame: game }); window.dispatchEvent(new Event("retro:return-room"));
-    try { const data = await post("/api/game-room", { action: "setGame", code: room.code, game }); setRoom(data.room as RoomState); }
+    try {
+      if (previous.currentGame === "football") await post("/api/football", { action: "stop", code: room.code });
+      const data = await post("/api/game-room", { action: "setGame", code: room.code, game });
+      setRoom(data.room as RoomState);
+    }
     catch (err) { setRoom(previous); setError(err instanceof Error ? err.message : "Impossible de changer de jeu."); }
     finally { setBusy(false); }
   }
@@ -93,6 +98,7 @@ export default function RoomGameController() {
       else if (room.currentGame === "rps") await post("/api/rps", { action: "stop", code: room.code });
       else if (room.currentGame === "dunkshot") await post("/api/dunkshot", { action: "stop", code: room.code });
       else if (room.currentGame === "pool") await post("/api/pool", { action: "stop", code: room.code });
+      else if (room.currentGame === "football") await post("/api/football", { action: "stop", code: room.code });
       else if (room.currentGame === "tictactoe") await post("/api/game-room", { action: "tttReset", code: room.code });
       else if (room.currentGame === "hangman") await post("/api/hangman", { action: "stop", code: room.code });
       setToast(`${label} · tout le monde est revenu au lobby`);
@@ -132,7 +138,9 @@ export default function RoomGameController() {
   if (!room) return null;
   const isHost = room.hostId === room.userId;
   const selected = GAME_REGISTRY.find((game) => game.key === room.currentGame) ?? GAME_REGISTRY[0];
+  const currentMember = room.members.find((member) => member.id === room.userId);
   const portalGame = target ? createPortal(<>
+    {room.currentGame === "football" && <div data-room-game-ui="true" className="roomGamePortal"><FootballGame room={room} user={{ id: room.userId, username: currentMember?.username ?? "Joueur" }}/></div>}
     {room.currentGame === "tictactoe" && <div data-room-game-ui="true" className="roomGamePortal"><TicTacToeGame room={room}/></div>}
     {room.currentGame === "higherlower" && <div data-room-game-ui="true" className="roomGamePortal"><HigherLowerGame/></div>}
     {room.currentGame === "hangman" && <div data-room-game-ui="true" className="roomGamePortal"><HangmanGame room={room}/></div>}
