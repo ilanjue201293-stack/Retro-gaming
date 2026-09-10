@@ -2,6 +2,8 @@
 
 import { useEffect } from "react";
 
+const initializedHockeySelects = new WeakSet<HTMLSelectElement>();
+
 function normalizeBotCopy() {
   document.querySelectorAll<HTMLElement>(".botPlayPanel").forEach((panel) => {
     const title = panel.querySelector<HTMLElement>("strong");
@@ -11,6 +13,15 @@ function normalizeBotCopy() {
     if (description && /pas besoin d'attendre|le bot choisit aussi/i.test(description.textContent || "")) description.textContent = "Le bot remplit simplement la place manquante.";
     if (button && /vs\s*bot|jouer\s+vs/i.test(button.textContent || "")) button.textContent = "Compléter et lancer";
   });
+
+  const hockeySelect = document.querySelector<HTMLSelectElement>(".hockeyLobby .botPlayPanel select");
+  if (hockeySelect && !initializedHockeySelects.has(hockeySelect)) {
+    initializedHockeySelects.add(hockeySelect);
+    if (hockeySelect.value === "normal") {
+      hockeySelect.value = "hard";
+      hockeySelect.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  }
 }
 
 export default function BotUXEnhancer() {
