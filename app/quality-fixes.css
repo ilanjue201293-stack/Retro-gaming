@@ -14,6 +14,13 @@
 .dunkBall{width:56px!important}.dunkBall span{font-size:51px!important}
 .dunkSetupV2{grid-template-columns:minmax(180px,1fr) repeat(3,minmax(105px,auto))!important}.dunkSetupV2>button{min-height:39px;align-self:end}.dunkSetupV2>label{min-width:105px}
 
+/* Football V2: full pointer capture, visible 360° aim and quicker arcade feedback. */
+.footballField.canAct{overflow:visible!important}
+.footballDisc{transition:left .17s cubic-bezier(.2,.85,.2,1),top .17s cubic-bezier(.2,.85,.2,1),transform .1s,border-color .1s!important}
+.footballBall{transition:left .17s cubic-bezier(.2,.85,.2,1),top .17s cubic-bezier(.2,.85,.2,1)!important}
+.footballAimLine{z-index:60!important;box-shadow:0 0 14px rgba(255,255,255,.36)!important}
+.footballPower{z-index:61!important}
+
 @media(max-width:900px){.dunkSetupV2{grid-template-columns:1fr 1fr!important}.dunkSetupV2>div{grid-column:1/-1}.dunkSetupV2>button{width:100%}}
 @media(max-width:700px){
   .commsButtons{bottom:78px!important;right:10px!important}
