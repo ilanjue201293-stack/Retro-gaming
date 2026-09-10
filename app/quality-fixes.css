@@ -10,10 +10,17 @@
 .numberBotPanel.thinking{border-color:rgba(143,240,189,.38);box-shadow:0 0 0 2px rgba(143,240,189,.05)}
 .guessHistory .botGuess{border-color:rgba(182,163,255,.32);background:rgba(182,163,255,.08);color:#d9d0ff}
 
+/* Dunkshot V2 keeps the old look but makes the visual ball match the collision model better. */
+.dunkBall{width:56px!important}.dunkBall span{font-size:51px!important}
+.dunkSetupV2{grid-template-columns:minmax(180px,1fr) repeat(3,minmax(105px,auto))!important}.dunkSetupV2>button{min-height:39px;align-self:end}.dunkSetupV2>label{min-width:105px}
+
+@media(max-width:900px){.dunkSetupV2{grid-template-columns:1fr 1fr!important}.dunkSetupV2>div{grid-column:1/-1}.dunkSetupV2>button{width:100%}}
 @media(max-width:700px){
   .commsButtons{bottom:78px!important;right:10px!important}
   .commsPanel{bottom:136px!important;right:10px!important;max-height:calc(100vh - 150px)!important}
   .messageToast{bottom:140px!important;right:10px!important}
   .numberModeActions{display:grid;grid-template-columns:1fr}.numberModeActions button{width:100%}
   .numberBotPanel{grid-template-columns:auto 1fr}.numberBotPanel em{grid-column:1/-1;text-align:left}
+  .dunkBall{width:52px!important}.dunkBall span{font-size:47px!important}
+  .dunkSetupV2{grid-template-columns:1fr!important}.dunkSetupV2>div{grid-column:auto}.dunkSetupV2>label,.dunkSetupV2>button{width:100%}
 }
