@@ -103,7 +103,7 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
       } catch (pollError) {
         if (alive && !gameRef.current) setError(pollError instanceof Error ? pollError.message : "Dunkshot indisponible.");
       }
-      if (alive) timer = window.setTimeout(() => void poll(), gameRef.current?.status === "playing" ? 180 : 900);
+      if (alive) timer = window.setTimeout(() => void poll(), gameRef.current?.status === "playing" ? 160 : 900);
     };
     void poll();
     return () => { alive = false; if (timer !== undefined) window.clearTimeout(timer); };
@@ -118,7 +118,7 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
         const data = await post({ action: "botTick", code: room.code });
         if (data.game) setGame(data.game as Game);
       } catch {} finally { botBusyRef.current = false; }
-    }, 330);
+    }, 180);
     return () => window.clearInterval(id);
   }, [game?.status, isHost, room.code, game?.players.map((player) => player.userId).join("|")]);
 
@@ -153,7 +153,11 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
   }, [active, focusSuppressed]);
 
   useEffect(() => {
-    if (!activeShot || resolvedShotsRef.current.has(activeShot.id)) return;
+    if (!activeShot) {
+      if (!soloActive && duelActive) setBall(restBall());
+      return;
+    }
+    if (resolvedShotsRef.current.has(activeShot.id)) return;
     const trajectory = buildDunkTrajectory(activeShot, activeStreak);
     let raf = 0;
     let stopped = false;
@@ -184,7 +188,7 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
         resolvedShotsRef.current.add(activeShot.id);
         stopped = true;
         if (soloActive) finishSolo();
-        else if (activeShot.shooterId === user.id) void post({ action: "resolve", code: room.code, shotId: activeShot.id }).then((data) => setGame(data.game as Game)).catch(() => undefined);
+        else if (activeShot.shooterId === user.id) void post({ action: "resolve", code: room.code, shotId: activeShot.id }).then((data) => { setGame(data.game as Game); setBall(restBall()); }).catch(() => undefined);
         return;
       }
       raf = requestAnimationFrame(animate);
@@ -192,7 +196,7 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
 
     raf = requestAnimationFrame(animate);
     return () => { stopped = true; cancelAnimationFrame(raf); };
-  }, [activeShot?.id, activeStreak, room.code, soloActive, user.id]);
+  }, [activeShot?.id, activeStreak, duelActive, room.code, soloActive, user.id]);
 
   useEffect(() => {
     if (!game?.lastResult) return;
@@ -289,7 +293,7 @@ export default function DunkshotGame({ room, user }: { room: Room; user: User })
       <label><span>Timer</span><select value={soloTimeLimitSec} onChange={(event) => setSoloTimeLimitSec(Number(event.target.value))}>{TIME_OPTIONS.map((value) => <option key={value} value={value}>{timeLabel(value)}</option>)}</select></label>
       <button className="primaryButton" onClick={startSolo}>Jouer en solo</button>
     </div> : <div className="dunkSetupPanel dunkSetupV2">
-      <div><strong>Duel à élimination</strong><small>Un raté retire une vie. Le bot difficile vise maintenant beaucoup mieux sans être parfait.</small></div>
+      <div><strong>Duel à élimination</strong><small>Un raté retire une vie. En difficile, le bot cherche directement une trajectoire qui rentre.</small></div>
       <label><span>Vies</span><select value={game.livesTotal} disabled={!isHost || busy} onChange={(event) => void configureSettings(Number(event.target.value), game.timeLimitSec)}>{LIVES_OPTIONS.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
       <label><span>Timer</span><select value={game.timeLimitSec} disabled={!isHost || busy} onChange={(event) => void configureSettings(game.livesTotal, Number(event.target.value))}>{TIME_OPTIONS.map((value) => <option key={value} value={value}>{timeLabel(value)}</option>)}</select></label>
       {isHost && <><label><span>Adversaire</span><select value={selectedOpponent} disabled={!opponents.length || busy} onChange={(event) => setSelectedOpponent(event.target.value)}><option value="">Choisir…</option>{opponents.map((member) => <option key={member.id} value={member.id}>{member.username}</option>)}</select></label><button className="primaryButton" disabled={!selectedOpponent || busy} onClick={() => void startDuel()}>Lancer le 1v1</button><label><span>BOT</span><select value={botDifficulty} onChange={(event) => setBotDifficulty(event.target.value as BotDifficulty)}><option value="easy">Facile</option><option value="normal">Normal</option><option value="hard">Difficile</option></select></label><button className="secondaryButton" disabled={busy} onClick={() => void startBot()}>🤖 Jouer vs BOT</button></>}
