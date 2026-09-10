@@ -4,6 +4,7 @@ export const GAME_REGISTRY = [
   { key: "rps", label: "Pierre · Feuille · Ciseaux", icon: "✊", meta: "DUEL · 2 JOUEURS", description: "Choisis en secret puis découvre le résultat après le décompte." },
   { key: "dunkshot", label: "Dunkshot", icon: "🏀", meta: "ARCADE · SOLO / 1V1", description: "Dose l'angle et la puissance pour enchaîner les paniers." },
   { key: "pool", label: "Billard", icon: "🎱", meta: "8-BALL · SOLO / 1V1", description: "Billard physique avec pleines, rayées, bots et vraie visée." },
+  { key: "football", label: "Foot à pions", icon: "⚽", meta: "TACTIQUE · 1V1 / 2V2", description: "Deux coups par tour, collisions entre pions et contrôle spécial de la balle." },
   { key: "tictactoe", label: "Morpion (Tic-Tac-Toe)", icon: "❌⭕", meta: "CLASSIQUE · 2 JOUEURS", description: "Aligne trois symboles avant ton adversaire, ou joue contre un bot." },
   { key: "higherlower", label: "Le Plus ou Moins", icon: "🔢", meta: "LOGIQUE · SOLO", description: "Le programme choisit un nombre : trouve-le grâce aux indices plus ou moins." },
   { key: "hangman", label: "Le Pendu", icon: "📝", meta: "MOTS · MULTI", description: "Proposez lettres ou mot entier chacun votre tour, avec un nombre d'essais réglable." },
