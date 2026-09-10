@@ -51,7 +51,7 @@ export default function HigherLowerGame() {
     if (!botTurn || mode !== "bot" || status !== "playing") return;
     const timer = window.setTimeout(() => {
       const value = randomBetween(range.min, range.max);
-      setHistory((current) => [{ by: "bot", value }, ...current].slice(0, 12));
+      setHistory((current) => [{ by: "bot" as const, value }, ...current].slice(0, 12));
       if (value === target) {
         setHint(`Le BOT a trouvé ${target} avant toi !`);
         setStatus("gameover");
@@ -69,7 +69,7 @@ export default function HigherLowerGame() {
     const value = Math.trunc(Number(guess));
     if (!Number.isFinite(value) || value < range.min || value > range.max) { setHint(`Entre un nombre entre ${range.min} et ${range.max}.`); return; }
     const nextAttempts = attempts + 1;
-    setAttempts(nextAttempts); setHistory((current) => [{ by: "toi", value }, ...current].slice(0, 12)); setGuess("");
+    setAttempts(nextAttempts); setHistory((current) => [{ by: "toi" as const, value }, ...current].slice(0, 12)); setGuess("");
     if (value === target) {
       setHint(`Trouvé en ${nextAttempts} essai${nextAttempts > 1 ? "s" : ""} !`);
       setStatus("gameover");
