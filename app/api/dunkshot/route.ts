@@ -3,7 +3,7 @@ import { requireUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { requireRoomMember } from "@/lib/room";
 import { cleanRoomCode, makeId } from "@/lib/utils";
-import { DUNK_DURATION, type DunkShot, dunkshotShotMade } from "@/lib/dunkshot-physics";
+import { buildDunkTrajectory, type DunkShot } from "@/lib/dunkshot-physics";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,7 +28,6 @@ type Row = {
 };
 
 const BOT_ID = "__dunkshot_bot__";
-
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 const difficulty = (value: unknown): BotDifficulty => value === "easy" || value === "hard" ? value : "normal";
 
@@ -78,19 +77,16 @@ async function ensureSchema() {
   }
   await schemaPromise;
 }
-
 async function ensureGame(code: string) {
   await ensureSchema();
   await db().query(`insert into retro_dunkshot_games (room_code) values ($1) on conflict (room_code) do nothing`, [code]);
 }
-
 async function getRow(code: string) {
   await ensureGame(code);
   const result = await db().query<Row>(`select room_code,status,players,lives_total,lives,turn_index,streak,shot,last_result,winner_id,time_limit_sec,started_at,ends_at from retro_dunkshot_games where room_code=$1 limit 1`, [code]);
   if (!result.rows[0]) throw new Error("Dunkshot indisponible.");
   return result.rows[0];
 }
-
 function output(row: Row) {
   return {
     status: row.status,
@@ -108,6 +104,10 @@ function output(row: Row) {
   };
 }
 
+function shotEndTime(shot: DunkShot, streak: number) {
+  return shot.startedAt + buildDunkTrajectory(shot, streak).duration * 1000 + 30;
+}
+
 async function resolveShot(code: string, expectedShotId?: string) {
   const client = await db().connect();
   try {
@@ -117,12 +117,14 @@ async function resolveShot(code: string, expectedShotId?: string) {
     if (!current || current.status !== "playing") { await client.query("rollback"); return; }
     const shot = parseShot(current.shot);
     if (!shot || (expectedShotId && shot.id !== expectedShotId)) { await client.query("rollback"); return; }
-    if (Date.now() < shot.startedAt + DUNK_DURATION * 1000 + 40) { await client.query("rollback"); return; }
+    const beforeStreak = Math.max(0, Number(current.streak) || 0);
+    const trajectory = buildDunkTrajectory(shot, beforeStreak);
+    if (Date.now() < shot.startedAt + trajectory.duration * 1000 + 30) { await client.query("rollback"); return; }
 
     const players = parsePlayers(current.players);
     const lives = parseLives(current.lives);
-    const made = dunkshotShotMade(shot, Math.max(0, Number(current.streak) || 0));
-    let streak = Math.max(0, Number(current.streak) || 0);
+    const made = trajectory.made;
+    let streak = beforeStreak;
     let winnerId: string | null = null;
     if (made) streak += 1;
     else {
@@ -141,7 +143,7 @@ async function resolveShot(code: string, expectedShotId?: string) {
 async function state(code: string) {
   let row = await getRow(code);
   const shot = parseShot(row.shot);
-  if (shot && Date.now() >= shot.startedAt + DUNK_DURATION * 1000 + 40) {
+  if (shot && Date.now() >= shotEndTime(shot, Math.max(0, Number(row.streak) || 0))) {
     await resolveShot(code, shot.id);
     row = await getRow(code);
   }
@@ -159,17 +161,29 @@ async function state(code: string) {
 }
 
 function makeBotShot(level: BotDifficulty, streak: number): DunkShot {
-  const wantedChance = level === "easy" ? 0.48 : level === "hard" ? 0.95 : 0.78;
+  const startedAt = Date.now() + (level === "hard" ? 150 : level === "easy" ? 520 : 340);
+  if (level === "hard") {
+    let fallback: DunkShot = { id: makeId(), shooterId: BOT_ID, power: 0.72, aim: 0, startedAt };
+    for (let attempt = 0; attempt < 420; attempt++) {
+      const power = 0.50 + Math.random() * 0.48;
+      const aim = (Math.random() * 2 - 1) * 0.48;
+      const shot: DunkShot = { id: makeId(), shooterId: BOT_ID, power, aim, startedAt };
+      fallback = shot;
+      if (buildDunkTrajectory(shot, streak).made) return shot;
+    }
+    return fallback;
+  }
+
+  const wantedChance = level === "easy" ? 0.48 : 0.82;
   const wantsMake = Math.random() < wantedChance;
-  const startedAt = Date.now() + (level === "hard" ? 250 : level === "easy" ? 560 : 390);
-  let fallback: DunkShot = { id: makeId(), shooterId: BOT_ID, power: 0.7, aim: 0, startedAt };
-  for (let attempt = 0; attempt < 180; attempt++) {
-    const power = level === "hard" ? 0.54 + Math.random() * 0.39 : 0.45 + Math.random() * 0.52;
-    const spread = level === "hard" ? 0.34 : level === "normal" ? 0.55 : 0.82;
+  let fallback: DunkShot = { id: makeId(), shooterId: BOT_ID, power: 0.70, aim: 0, startedAt };
+  for (let attempt = 0; attempt < 220; attempt++) {
+    const power = 0.45 + Math.random() * 0.52;
+    const spread = level === "normal" ? 0.58 : 0.82;
     const aim = (Math.random() * 2 - 1) * spread;
-    const shot = { id: makeId(), shooterId: BOT_ID, power, aim, startedAt };
+    const shot: DunkShot = { id: makeId(), shooterId: BOT_ID, power, aim, startedAt };
     fallback = shot;
-    if (dunkshotShotMade(shot, streak) === wantsMake) return shot;
+    if (buildDunkTrajectory(shot, streak).made === wantsMake) return shot;
   }
   return fallback;
 }
@@ -258,7 +272,7 @@ export async function POST(req: NextRequest) {
       if (!bot || currentPlayer?.userId !== BOT_ID) return NextResponse.json({ ok: true, game: output(current), changed: false });
       const active = parseShot(current.shot);
       if (active) {
-        if (Date.now() >= active.startedAt + DUNK_DURATION * 1000 + 40) await resolveShot(code, active.id);
+        if (Date.now() >= shotEndTime(active, Math.max(0, Number(current.streak) || 0))) await resolveShot(code, active.id);
       } else {
         const shot = makeBotShot(difficulty(bot.difficulty), Math.max(0, Number(current.streak) || 0));
         await db().query(`update retro_dunkshot_games set shot=$1::jsonb,last_result=null,updated_at=now() where room_code=$2 and shot is null`, [JSON.stringify(shot), code]);
