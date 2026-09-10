@@ -1,6 +1,6 @@
 import { db, ensureSchema } from "./db";
 
-export const ROOM_GAMES = ["hockey", "pong", "rps", "dunkshot", "pool", "tictactoe", "higherlower", "hangman", "flappy"] as const;
+export const ROOM_GAMES = ["hockey", "pong", "rps", "dunkshot", "pool", "football", "tictactoe", "higherlower", "hangman", "flappy"] as const;
 export type RoomGameKey = typeof ROOM_GAMES[number];
 
 export function isRoomGameKey(value: unknown): value is RoomGameKey {
