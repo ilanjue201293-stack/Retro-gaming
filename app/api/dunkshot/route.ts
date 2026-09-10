@@ -1,13 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { SESSION_COOKIE } from "@/lib/auth";
+import { requireUser } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { cleanRoomCode, makeId, sha256 } from "@/lib/utils";
+import { requireRoomMember } from "@/lib/room";
+import { cleanRoomCode, makeId } from "@/lib/utils";
+import { DUNK_DURATION, type DunkShot, dunkshotShotMade } from "@/lib/dunkshot-physics";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type Player = { userId: string; username: string };
-type Shot = { id: string; shooterId: string; power: number; aim: number; startedAt: number };
+type BotDifficulty = "easy" | "normal" | "hard";
+type Player = { userId: string; username: string; isBot?: boolean; difficulty?: BotDifficulty };
 type LastResult = { shotId: string; shooterId: string; made: boolean; at: number };
 type Row = {
   room_code: string;
@@ -25,27 +27,44 @@ type Row = {
   ends_at: number | null;
 };
 
+const BOT_ID = "__dunkshot_bot__";
+
+const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+const difficulty = (value: unknown): BotDifficulty => value === "easy" || value === "hard" ? value : "normal";
+
+function parsePlayers(value: unknown): Player[] {
+  return Array.isArray(value) ? value.filter((entry): entry is Player => Boolean(entry && typeof entry === "object" && "userId" in entry && "username" in entry)) : [];
+}
+function parseLives(value: unknown): Record<string, number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, raw]) => [key, Math.max(0, Number(raw) || 0)]));
+}
+function parseShot(value: unknown): DunkShot | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Partial<DunkShot>;
+  if (!raw.id || !raw.shooterId) return null;
+  return { id: String(raw.id), shooterId: String(raw.shooterId), power: clamp(Number(raw.power) || 0, 0, 1), aim: clamp(Number(raw.aim) || 0, -1, 1), startedAt: Number(raw.startedAt) || Date.now() };
+}
+function parseResult(value: unknown): LastResult | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Partial<LastResult>;
+  if (!raw.shotId || !raw.shooterId) return null;
+  return { shotId: String(raw.shotId), shooterId: String(raw.shooterId), made: Boolean(raw.made), at: Number(raw.at) || Date.now() };
+}
+
 let schemaPromise: Promise<void> | null = null;
 async function ensureSchema() {
   if (!schemaPromise) {
     schemaPromise = db().query(`
       create table if not exists retro_dunkshot_games (
         room_code text primary key references retro_rooms(code) on delete cascade,
-        status text not null default 'lobby',
-        players jsonb not null default '[]'::jsonb,
-        lives_total integer not null default 1,
-        lives jsonb not null default '{}'::jsonb,
-        turn_index integer not null default 0,
-        streak integer not null default 0,
-        shot jsonb,
-        last_result jsonb,
-        winner_id text,
-        time_limit_sec integer not null default 0,
-        started_at bigint,
-        ends_at bigint,
-        updated_at timestamptz not null default now()
+        status text not null default 'lobby', players jsonb not null default '[]'::jsonb,
+        lives_total integer not null default 3, lives jsonb not null default '{}'::jsonb,
+        turn_index integer not null default 0, streak integer not null default 0,
+        shot jsonb, last_result jsonb, winner_id text, time_limit_sec integer not null default 0,
+        started_at bigint, ends_at bigint, updated_at timestamptz not null default now()
       );
-      alter table retro_dunkshot_games add column if not exists lives_total integer not null default 1;
+      alter table retro_dunkshot_games add column if not exists lives_total integer not null default 3;
       alter table retro_dunkshot_games add column if not exists lives jsonb not null default '{}'::jsonb;
       alter table retro_dunkshot_games add column if not exists turn_index integer not null default 0;
       alter table retro_dunkshot_games add column if not exists streak integer not null default 0;
@@ -55,42 +74,9 @@ async function ensureSchema() {
       alter table retro_dunkshot_games add column if not exists time_limit_sec integer not null default 0;
       alter table retro_dunkshot_games add column if not exists started_at bigint;
       alter table retro_dunkshot_games add column if not exists ends_at bigint;
-    `).then(() => undefined).catch((error) => {
-      schemaPromise = null;
-      throw error;
-    });
+    `).then(() => undefined).catch((error) => { schemaPromise = null; throw error; });
   }
   await schemaPromise;
-}
-
-async function body(req: NextRequest) {
-  try { return await req.json(); } catch { return {}; }
-}
-
-async function authInRoom(req: NextRequest, code: string) {
-  const token = req.cookies.get(SESSION_COOKIE)?.value;
-  if (!token) throw new Error("AUTH_REQUIRED");
-  const result = await db().query<{ id: string; username: string }>(
-    `select u.id,u.username
-     from retro_sessions s
-     join retro_users u on u.id=s.user_id
-     join retro_room_members m on m.user_id=u.id and m.room_code=$2
-     join retro_rooms r on r.code=m.room_code
-     where s.token_hash=$1 and s.expires_at>now() and r.expires_at>now()
-     limit 1`,
-    [sha256(token), code]
-  );
-  if (!result.rows[0]) throw new Error("Tu n'es pas dans cette room.");
-  return result.rows[0];
-}
-
-async function hostId(code: string) {
-  const result = await db().query<{ host_user_id: string }>(
-    `select host_user_id from retro_rooms where code=$1 and expires_at>now() limit 1`,
-    [code]
-  );
-  if (!result.rows[0]) throw new Error("Room introuvable ou expirée.");
-  return result.rows[0].host_user_id;
 }
 
 async function ensureGame(code: string) {
@@ -98,234 +84,137 @@ async function ensureGame(code: string) {
   await db().query(`insert into retro_dunkshot_games (room_code) values ($1) on conflict (room_code) do nothing`, [code]);
 }
 
-function parsePlayers(value: unknown): Player[] {
-  return Array.isArray(value) ? value.filter((entry): entry is Player => Boolean(entry && typeof entry === "object" && "userId" in entry && "username" in entry)) : [];
-}
-function parseLives(value: unknown): Record<string, number> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  const out: Record<string, number> = {};
-  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) out[key] = Math.max(0, Number(raw) || 0);
-  return out;
-}
-function parseShot(value: unknown): Shot | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const raw = value as Partial<Shot>;
-  if (!raw.id || !raw.shooterId) return null;
-  return { id: String(raw.id), shooterId: String(raw.shooterId), power: Math.max(0, Math.min(1, Number(raw.power) || 0)), aim: Math.max(-1, Math.min(1, Number(raw.aim) || 0)), startedAt: Number(raw.startedAt) || Date.now() };
-}
-function parseResult(value: unknown): LastResult | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const raw = value as Partial<LastResult>;
-  if (!raw.shotId || !raw.shooterId) return null;
-  return { shotId: String(raw.shotId), shooterId: String(raw.shooterId), made: Boolean(raw.made), at: Number(raw.at) || Date.now() };
-}
-
-const DUNK_BALL_START_X = 0.5;
-const DUNK_BALL_START_Y = 0.86;
-const DUNK_GRAVITY = 2.05;
-const DUNK_STEP = 1 / 180;
-const DUNK_RIM_Y_OFFSET = 0.065;
-const DUNK_RIM_HALF = 0.064;
-const DUNK_RIM_COLLISION_RADIUS = 0.038;
-const DUNK_SCORE_HALF = 0.050;
-const DUNK_FLOOR_Y = 0.94;
-
-function dunkClamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function dunkHoopPosition(streak: number, now: number) {
-  if (streak < 2) return { x: 0.5, y: 0.285 };
-  const horizontalAmplitude = Math.min(0.285, 0.085 + (streak - 2) * 0.018);
-  const horizontalSpeed = 0.00105 + Math.min(0.00125, streak * 0.000085);
-  const x = 0.5 + horizontalAmplitude * Math.sin(now * horizontalSpeed + streak * 1.43);
-  if (streak < 6) return { x, y: 0.285 };
-  const verticalAmplitude = Math.min(0.07, 0.018 + (streak - 6) * 0.006);
-  const y = 0.285 + verticalAmplitude * Math.sin(now * (0.0008 + streak * 0.000045) + 0.9);
-  return { x, y };
-}
-
-function dunkshotShotMade(shot: Shot, streak: number) {
-  const power = dunkClamp(shot.power, 0, 1);
-  let x = DUNK_BALL_START_X;
-  let y = DUNK_BALL_START_Y;
-  let vx = dunkClamp(shot.aim, -1, 1) * (0.32 + power * 0.16);
-  let vy = -(1.08 + power * 0.83);
-  let floorBounces = 0;
-  let made = false;
-
-  for (let elapsed = 0; elapsed <= 2.65; elapsed += DUNK_STEP) {
-    const previousY = y;
-    vy += DUNK_GRAVITY * DUNK_STEP;
-    x += vx * DUNK_STEP;
-    y += vy * DUNK_STEP;
-
-    const hoop = dunkHoopPosition(streak, shot.startedAt + (elapsed + DUNK_STEP) * 1000);
-    const rimY = hoop.y + DUNK_RIM_Y_OFFSET;
-
-    if (!made && floorBounces === 0 && previousY < rimY && y >= rimY && vy > 0 && Math.abs(x - hoop.x) < DUNK_SCORE_HALF) {
-      made = true;
-      break;
-    }
-
-    if (floorBounces === 0 && vy > 0) {
-      for (const rimX of [hoop.x - DUNK_RIM_HALF, hoop.x + DUNK_RIM_HALF]) {
-        const dx = x - rimX;
-        const dy = y - rimY;
-        const distance = Math.hypot(dx, dy);
-        if (dy <= 0.002 && distance > 0.0001 && distance < DUNK_RIM_COLLISION_RADIUS) {
-          const nx = dx / distance;
-          const ny = dy / distance;
-          const approach = vx * nx + vy * ny;
-          if (approach < 0) {
-            const restitution = 0.72;
-            vx -= (1 + restitution) * approach * nx;
-            vy -= (1 + restitution) * approach * ny;
-            vx *= 0.97;
-            vy *= 0.97;
-            x = rimX + nx * DUNK_RIM_COLLISION_RADIUS;
-            y = rimY + ny * DUNK_RIM_COLLISION_RADIUS;
-          }
-        }
-      }
-    }
-
-    if (y >= DUNK_FLOOR_Y && vy > 0) {
-      floorBounces += 1;
-      break;
-    }
-    if (Math.abs(x) > 1.4) break;
-  }
-  return made;
+async function getRow(code: string) {
+  await ensureGame(code);
+  const result = await db().query<Row>(`select room_code,status,players,lives_total,lives,turn_index,streak,shot,last_result,winner_id,time_limit_sec,started_at,ends_at from retro_dunkshot_games where room_code=$1 limit 1`, [code]);
+  if (!result.rows[0]) throw new Error("Dunkshot indisponible.");
+  return result.rows[0];
 }
 
 function output(row: Row) {
   return {
     status: row.status,
     players: parsePlayers(row.players),
-    livesTotal: Math.max(1, Math.min(10, Number(row.lives_total) || 1)),
+    livesTotal: clamp(Math.round(Number(row.lives_total) || 3), 1, 10),
     lives: parseLives(row.lives),
-    turnIndex: Math.max(0, Number(row.turn_index) || 0),
-    streak: Math.max(0, Number(row.streak) || 0),
+    turnIndex: Math.max(0, Math.round(Number(row.turn_index) || 0)),
+    streak: Math.max(0, Math.round(Number(row.streak) || 0)),
     shot: parseShot(row.shot),
     lastResult: parseResult(row.last_result),
     winnerId: row.winner_id,
-    timeLimitSec: Math.max(0, Math.min(600, Number(row.time_limit_sec) || 0)),
+    timeLimitSec: clamp(Math.round(Number(row.time_limit_sec) || 0), 0, 600),
     startedAt: row.started_at ? Number(row.started_at) : null,
     endsAt: row.ends_at ? Number(row.ends_at) : null,
   };
 }
 
-async function row(code: string) {
-  await ensureGame(code);
-  const result = await db().query<Row>(
-    `select room_code,status,players,lives_total,lives,turn_index,streak,shot,last_result,winner_id,time_limit_sec,started_at,ends_at
-     from retro_dunkshot_games where room_code=$1 limit 1`,
-    [code]
-  );
-  if (!result.rows[0]) throw new Error("Dunkshot indisponible.");
-  return result.rows[0];
-}
-
-async function resetOtherGames(code: string) {
-  await db().query(`update retro_hockey_games set status='lobby',players='[]'::jsonb,left_score=0,right_score=0,winner_side=null,updated_at=now() where room_code=$1`, [code]).catch(() => undefined);
-  await db().query(`update retro_pong_games set status='lobby',players='[]'::jsonb,left_score=0,right_score=0,winner_side=null,started_at=null,updated_at=now() where room_code=$1`, [code]).catch(() => undefined);
-  await db().query(`update retro_rps_games set status='lobby',players='[]'::jsonb,round_index=0,left_score=0,right_score=0,choices='{}'::jsonb,phase='choosing',phase_started_at=null,phase_ends_at=null,last_result=null,winner_side=null,updated_at=now() where room_code=$1`, [code]).catch(() => undefined);
-}
-
-async function expireTimedGame(current: Row) {
-  const endsAt = Number(current.ends_at) || 0;
-  if (current.status !== "playing" || !endsAt || Date.now() < endsAt || parseShot(current.shot)) return current;
-  const players = parsePlayers(current.players);
-  const lives = parseLives(current.lives);
-  let winnerId: string | null = null;
-  if (players.length >= 2) {
-    const first = lives[players[0].userId] ?? current.lives_total;
-    const second = lives[players[1].userId] ?? current.lives_total;
-    if (first > second) winnerId = players[0].userId;
-    else if (second > first) winnerId = players[1].userId;
-  }
-  await db().query(`update retro_dunkshot_games set status='gameover',winner_id=$1,shot=null,updated_at=now() where room_code=$2`, [winnerId, current.room_code]);
-  return await row(current.room_code);
-}
-
-async function resolveStaleShot(current: Row) {
-  const initialShot = parseShot(current.shot);
-  if (current.status !== "playing" || !initialShot || Date.now() < initialShot.startedAt + 3000) return current;
+async function resolveShot(code: string, expectedShotId?: string) {
   const client = await db().connect();
   try {
     await client.query("begin");
-    const result = await client.query<Row>(`select room_code,status,players,lives_total,lives,turn_index,streak,shot,last_result,winner_id,time_limit_sec,started_at,ends_at from retro_dunkshot_games where room_code=$1 for update`, [current.room_code]);
-    const locked = result.rows[0];
-    const shot = locked ? parseShot(locked.shot) : null;
-    if (!locked || locked.status !== "playing" || !shot || shot.id !== initialShot.id || Date.now() < shot.startedAt + 3000) { await client.query("rollback"); return locked ?? current; }
-    const players = parsePlayers(locked.players);
-    const lives = parseLives(locked.lives);
-    const made = dunkshotShotMade(shot, Math.max(0, Number(locked.streak) || 0));
-    let streak = Math.max(0, Number(locked.streak) || 0), winnerId: string | null = null;
+    const result = await client.query<Row>(`select room_code,status,players,lives_total,lives,turn_index,streak,shot,last_result,winner_id,time_limit_sec,started_at,ends_at from retro_dunkshot_games where room_code=$1 for update`, [code]);
+    const current = result.rows[0];
+    if (!current || current.status !== "playing") { await client.query("rollback"); return; }
+    const shot = parseShot(current.shot);
+    if (!shot || (expectedShotId && shot.id !== expectedShotId)) { await client.query("rollback"); return; }
+    if (Date.now() < shot.startedAt + DUNK_DURATION * 1000 + 40) { await client.query("rollback"); return; }
+
+    const players = parsePlayers(current.players);
+    const lives = parseLives(current.lives);
+    const made = dunkshotShotMade(shot, Math.max(0, Number(current.streak) || 0));
+    let streak = Math.max(0, Number(current.streak) || 0);
+    let winnerId: string | null = null;
     if (made) streak += 1;
     else {
-      lives[shot.shooterId] = Math.max(0, (lives[shot.shooterId] ?? locked.lives_total) - 1);
+      lives[shot.shooterId] = Math.max(0, (lives[shot.shooterId] ?? current.lives_total) - 1);
       streak = 0;
       if (lives[shot.shooterId] <= 0) winnerId = players.find((player) => player.userId !== shot.shooterId)?.userId ?? null;
     }
     const lastResult: LastResult = { shotId: shot.id, shooterId: shot.shooterId, made, at: Date.now() };
-    const nextTurn = players.length ? (Math.max(0, Number(locked.turn_index) || 0) + 1) % players.length : 0;
-    await client.query(`update retro_dunkshot_games set lives=$1::jsonb,turn_index=$2,streak=$3,shot=null,last_result=$4::jsonb,winner_id=$5,status=$6,updated_at=now() where room_code=$7`, [JSON.stringify(lives), nextTurn, streak, JSON.stringify(lastResult), winnerId, winnerId ? "gameover" : "playing", locked.room_code]);
+    const nextTurn = players.length ? (Math.max(0, Number(current.turn_index) || 0) + 1) % players.length : 0;
+    await client.query(`update retro_dunkshot_games set lives=$1::jsonb,turn_index=$2,streak=$3,shot=null,last_result=$4::jsonb,winner_id=$5,status=$6,updated_at=now() where room_code=$7`, [JSON.stringify(lives), nextTurn, streak, JSON.stringify(lastResult), winnerId, winnerId ? "gameover" : "playing", code]);
     await client.query("commit");
   } catch (error) { try { await client.query("rollback"); } catch {} throw error; }
   finally { client.release(); }
-  return await row(current.room_code);
 }
 
 async function state(code: string) {
-  let current = await resolveStaleShot(await row(code));
-  current = await expireTimedGame(current);
-  return output(current);
+  let row = await getRow(code);
+  const shot = parseShot(row.shot);
+  if (shot && Date.now() >= shot.startedAt + DUNK_DURATION * 1000 + 40) {
+    await resolveShot(code, shot.id);
+    row = await getRow(code);
+  }
+  if (row.status === "playing" && row.ends_at && Date.now() >= Number(row.ends_at) && !parseShot(row.shot)) {
+    const players = parsePlayers(row.players), lives = parseLives(row.lives);
+    let winnerId: string | null = null;
+    if (players.length >= 2) {
+      const a = lives[players[0].userId] ?? row.lives_total, b = lives[players[1].userId] ?? row.lives_total;
+      if (a > b) winnerId = players[0].userId; else if (b > a) winnerId = players[1].userId;
+    }
+    await db().query(`update retro_dunkshot_games set status='gameover',winner_id=$1,updated_at=now() where room_code=$2`, [winnerId, code]);
+    row = await getRow(code);
+  }
+  return output(row);
+}
+
+function makeBotShot(level: BotDifficulty, streak: number): DunkShot {
+  const wantedChance = level === "easy" ? 0.48 : level === "hard" ? 0.95 : 0.78;
+  const wantsMake = Math.random() < wantedChance;
+  const startedAt = Date.now() + (level === "hard" ? 250 : level === "easy" ? 560 : 390);
+  let fallback: DunkShot = { id: makeId(), shooterId: BOT_ID, power: 0.7, aim: 0, startedAt };
+  for (let attempt = 0; attempt < 180; attempt++) {
+    const power = level === "hard" ? 0.54 + Math.random() * 0.39 : 0.45 + Math.random() * 0.52;
+    const spread = level === "hard" ? 0.34 : level === "normal" ? 0.55 : 0.82;
+    const aim = (Math.random() * 2 - 1) * spread;
+    const shot = { id: makeId(), shooterId: BOT_ID, power, aim, startedAt };
+    fallback = shot;
+    if (dunkshotShotMade(shot, streak) === wantsMake) return shot;
+  }
+  return fallback;
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const data = await body(req);
+    const data = await req.json().catch(() => ({}));
     const code = cleanRoomCode(data.code);
+    if (code.length !== 5) throw new Error("Code de room invalide.");
     const action = String(data.action ?? "state");
-    const user = await authInRoom(req, code);
+    const user = await requireUser(req);
+    const membership = await requireRoomMember(code, user);
     await ensureGame(code);
 
     if (action === "state") return NextResponse.json({ ok: true, game: await state(code) });
 
     if (action === "configure") {
-      if (await hostId(code) !== user.id) throw new Error("Seul l'hôte peut régler Dunkshot.");
-      const livesTotal = Math.max(1, Math.min(10, Math.round(Number(data.livesTotal) || 1)));
-      const timeLimitSec = Math.max(0, Math.min(600, Math.round(Number(data.timeLimitSec) || 0)));
+      if (membership.host_user_id !== user.id) throw new Error("Seul l'hôte peut régler Dunkshot.");
+      const livesTotal = clamp(Math.round(Number(data.livesTotal) || 3), 1, 10);
+      const timeLimitSec = clamp(Math.round(Number(data.timeLimitSec) || 0), 0, 600);
       await db().query(`update retro_dunkshot_games set lives_total=$1,time_limit_sec=$2,status='lobby',players='[]'::jsonb,lives='{}'::jsonb,turn_index=0,streak=0,shot=null,last_result=null,winner_id=null,started_at=null,ends_at=null,updated_at=now() where room_code=$3`, [livesTotal, timeLimitSec, code]);
       return NextResponse.json({ ok: true, game: await state(code) });
     }
 
-    if (action === "start") {
-      if (await hostId(code) !== user.id) throw new Error("Seul l'hôte peut lancer le 1v1 Dunkshot.");
-      const opponentId = String(data.opponentId ?? "");
-      const members = await db().query<{ id: string; username: string }>(
-        `select u.id,u.username
-         from retro_room_members m join retro_users u on u.id=m.user_id
-         where m.room_code=$1 and m.last_seen>now()-interval '15 seconds'
-         order by m.joined_at`,
-        [code]
-      );
+    if (action === "start" || action === "startBot") {
+      if (membership.host_user_id !== user.id) throw new Error("Seul l'hôte peut lancer Dunkshot.");
+      const settings = await getRow(code);
+      const members = await db().query<{ id: string; username: string }>(`select u.id,u.username from retro_room_members m join retro_users u on u.id=m.user_id where m.room_code=$1 and m.last_seen>now()-interval '15 seconds' order by m.joined_at`, [code]);
       const host = members.rows.find((member) => member.id === user.id);
-      const opponent = members.rows.find((member) => member.id === opponentId && member.id !== user.id) ?? members.rows.find((member) => member.id !== user.id);
-      if (!host || !opponent) throw new Error("Il faut au moins 2 joueurs connectés pour le 1v1.");
-      const settings = await row(code);
-      const players: Player[] = [{ userId: host.id, username: host.username }, { userId: opponent.id, username: opponent.username }];
-      const lives = Object.fromEntries(players.map((player) => [player.userId, Math.max(1, Math.min(10, Number(settings.lives_total) || 1))]));
-      const timeLimitSec = Math.max(0, Math.min(600, Number(settings.time_limit_sec) || 0));
+      if (!host) throw new Error("Hôte introuvable.");
+      let opponent: Player;
+      if (action === "startBot") opponent = { userId: BOT_ID, username: "BOT", isBot: true, difficulty: difficulty(data.botDifficulty) };
+      else {
+        const opponentId = String(data.opponentId ?? "");
+        const found = members.rows.find((member) => member.id === opponentId && member.id !== user.id) ?? members.rows.find((member) => member.id !== user.id);
+        if (!found) throw new Error("Il faut un deuxième joueur, ou utilise le BOT.");
+        opponent = { userId: found.id, username: found.username };
+      }
+      const players: Player[] = [{ userId: host.id, username: host.username }, opponent];
+      const livesTotal = clamp(Number(settings.lives_total) || 3, 1, 10);
+      const lives = { [players[0].userId]: livesTotal, [players[1].userId]: livesTotal };
       const startedAt = Date.now();
+      const timeLimitSec = clamp(Number(settings.time_limit_sec) || 0, 0, 600);
       const endsAt = timeLimitSec > 0 ? startedAt + timeLimitSec * 1000 : null;
-      await resetOtherGames(code);
-      await db().query(
-        `update retro_dunkshot_games set status='playing',players=$1::jsonb,lives=$2::jsonb,turn_index=0,streak=0,shot=null,last_result=null,winner_id=null,started_at=$3,ends_at=$4,updated_at=now() where room_code=$5`,
-        [JSON.stringify(players), JSON.stringify(lives), startedAt, endsAt, code]
-      );
+      await db().query(`update retro_dunkshot_games set status='playing',players=$1::jsonb,lives=$2::jsonb,turn_index=0,streak=0,shot=null,last_result=null,winner_id=null,started_at=$3,ends_at=$4,updated_at=now() where room_code=$5`, [JSON.stringify(players), JSON.stringify(lives), startedAt, endsAt, code]);
       return NextResponse.json({ ok: true, game: await state(code) });
     }
 
@@ -336,73 +225,57 @@ export async function POST(req: NextRequest) {
         const result = await client.query<Row>(`select room_code,status,players,lives_total,lives,turn_index,streak,shot,last_result,winner_id,time_limit_sec,started_at,ends_at from retro_dunkshot_games where room_code=$1 for update`, [code]);
         const current = result.rows[0];
         if (!current || current.status !== "playing") throw new Error("La partie Dunkshot n'est pas en cours.");
-        if (current.ends_at && Number(current.ends_at) <= Date.now()) throw new Error("Temps écoulé.");
         const players = parsePlayers(current.players);
-        const shooter = players[Math.max(0, current.turn_index) % Math.max(1, players.length)];
-        if (!shooter || shooter.userId !== user.id) throw new Error("Ce n'est pas ton tour.");
+        const currentPlayer = players[Math.max(0, Number(current.turn_index) || 0) % Math.max(1, players.length)];
+        if (!currentPlayer || currentPlayer.userId !== user.id || currentPlayer.isBot) throw new Error("Ce n'est pas ton tour.");
         if (parseShot(current.shot)) throw new Error("Un tir est déjà en cours.");
-        const power = Math.max(0, Math.min(1, Number(data.power) || 0));
-        const aim = Math.max(-1, Math.min(1, Number(data.aim) || 0));
+        const power = clamp(Number(data.power) || 0, 0, 1), aim = clamp(Number(data.aim) || 0, -1, 1);
         if (power < 0.08) throw new Error("Tir trop faible.");
-        const requestedId = String(data.shotId ?? "").trim();
-        const requestedStart = Number(data.startedAt);
         const now = Date.now();
-        const startedAt = Number.isFinite(requestedStart) ? Math.max(now - 40, Math.min(now + 120, requestedStart)) : now + 55;
-        const shot: Shot = { id: requestedId && requestedId.length <= 120 ? requestedId : makeId(), shooterId: user.id, power, aim, startedAt };
+        const requestedStart = Number(data.startedAt);
+        const shot: DunkShot = {
+          id: String(data.shotId || makeId()).slice(0, 120), shooterId: user.id, power, aim,
+          startedAt: Number.isFinite(requestedStart) ? clamp(requestedStart, now - 30, now + 100) : now + 45,
+        };
         await client.query(`update retro_dunkshot_games set shot=$1::jsonb,last_result=null,updated_at=now() where room_code=$2`, [JSON.stringify(shot), code]);
         await client.query("commit");
-        return NextResponse.json({ ok: true, game: await state(code) });
-      } catch (error) {
-        await client.query("rollback");
-        throw error;
-      } finally { client.release(); }
+      } catch (error) { try { await client.query("rollback"); } catch {} throw error; }
+      finally { client.release(); }
+      return NextResponse.json({ ok: true, game: await state(code) });
     }
 
     if (action === "resolve") {
-      const client = await db().connect();
-      try {
-        await client.query("begin");
-        const result = await client.query<Row>(`select room_code,status,players,lives_total,lives,turn_index,streak,shot,last_result,winner_id,time_limit_sec,started_at,ends_at from retro_dunkshot_games where room_code=$1 for update`, [code]);
-        const current = result.rows[0];
-        if (!current || current.status !== "playing") { await client.query("rollback"); return NextResponse.json({ ok: true, game: await state(code) }); }
-        const shot = parseShot(current.shot);
-        const shotId = String(data.shotId ?? "");
-        if (!shot || shot.id !== shotId) { await client.query("rollback"); return NextResponse.json({ ok: true, game: await state(code) }); }
-        if (shot.shooterId !== user.id) throw new Error("Seul le tireur peut valider son tir.");
-        const players = parsePlayers(current.players);
-        const lives = parseLives(current.lives);
-        const made = dunkshotShotMade(shot, Math.max(0, Number(current.streak) || 0));
-        let streak = Math.max(0, Number(current.streak) || 0);
-        let winnerId: string | null = null;
-        if (made) streak += 1;
-        else {
-          lives[user.id] = Math.max(0, (lives[user.id] ?? current.lives_total) - 1);
-          streak = 0;
-          if (lives[user.id] <= 0) winnerId = players.find((player) => player.userId !== user.id)?.userId ?? null;
-        }
-        const lastResult: LastResult = { shotId: shot.id, shooterId: user.id, made, at: Date.now() };
-        const nextTurn = players.length ? (Math.max(0, Number(current.turn_index) || 0) + 1) % players.length : 0;
-        await client.query(
-          `update retro_dunkshot_games set lives=$1::jsonb,turn_index=$2,streak=$3,shot=null,last_result=$4::jsonb,winner_id=$5,status=$6,updated_at=now() where room_code=$7`,
-          [JSON.stringify(lives), nextTurn, streak, JSON.stringify(lastResult), winnerId, winnerId ? "gameover" : "playing", code]
-        );
-        await client.query("commit");
-        return NextResponse.json({ ok: true, game: await state(code) });
-      } catch (error) {
-        try { await client.query("rollback"); } catch {}
-        throw error;
-      } finally { client.release(); }
+      await resolveShot(code, String(data.shotId ?? ""));
+      return NextResponse.json({ ok: true, game: await state(code) });
+    }
+
+    if (action === "botTick") {
+      if (membership.host_user_id !== user.id) throw new Error("Seul l'hôte synchronise le bot.");
+      let current = await getRow(code);
+      if (current.status !== "playing") return NextResponse.json({ ok: true, game: output(current), changed: false });
+      const players = parsePlayers(current.players), bot = players.find((player) => player.userId === BOT_ID && player.isBot);
+      const currentPlayer = players[Math.max(0, Number(current.turn_index) || 0) % Math.max(1, players.length)];
+      if (!bot || currentPlayer?.userId !== BOT_ID) return NextResponse.json({ ok: true, game: output(current), changed: false });
+      const active = parseShot(current.shot);
+      if (active) {
+        if (Date.now() >= active.startedAt + DUNK_DURATION * 1000 + 40) await resolveShot(code, active.id);
+      } else {
+        const shot = makeBotShot(difficulty(bot.difficulty), Math.max(0, Number(current.streak) || 0));
+        await db().query(`update retro_dunkshot_games set shot=$1::jsonb,last_result=null,updated_at=now() where room_code=$2 and shot is null`, [JSON.stringify(shot), code]);
+      }
+      current = await getRow(code);
+      return NextResponse.json({ ok: true, game: output(current), changed: true });
     }
 
     if (action === "stop") {
-      if (await hostId(code) !== user.id) throw new Error("Seul l'hôte peut arrêter Dunkshot.");
+      if (membership.host_user_id !== user.id) throw new Error("Seul l'hôte peut arrêter Dunkshot.");
       await db().query(`update retro_dunkshot_games set status='lobby',players='[]'::jsonb,lives='{}'::jsonb,turn_index=0,streak=0,shot=null,last_result=null,winner_id=null,started_at=null,ends_at=null,updated_at=now() where room_code=$1`, [code]);
       return NextResponse.json({ ok: true, game: await state(code) });
     }
 
     throw new Error("Action Dunkshot inconnue.");
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Erreur inconnue.";
-    return NextResponse.json({ ok: false, error: message === "AUTH_REQUIRED" ? "Connexion requise." : message }, { status: message === "AUTH_REQUIRED" ? 401 : 400 });
+    const message = error instanceof Error ? error.message : "Erreur Dunkshot.";
+    return NextResponse.json({ ok: false, error: message }, { status: message === "AUTH_REQUIRED" ? 401 : 400 });
   }
 }
