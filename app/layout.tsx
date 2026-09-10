@@ -12,6 +12,7 @@ import "./pool.css";
 import "./football.css";
 import "./room-games.css";
 import "./mini-games.css";
+import "./quality-fixes.css";
 
 export const metadata: Metadata = {
   title: "Retro Gaming",
