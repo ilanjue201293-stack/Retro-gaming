@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import RoomComms from "./RoomComms";
 import HockeyGame from "./HockeyGame";
 import PongGame from "./PongGame";
@@ -53,6 +53,7 @@ export default function RetroApp() {
   const [hockeyActive, setHockeyActive] = useState(false);
   const [activeGame, setActiveGame] = useState<"hockey" | "pool" | null>(null);
   const [selectedRoomGame, setSelectedRoomGame] = useState<RoomGameKey>("hockey");
+  const leavingRoomRef = useRef(false);
 
   const me = useCallback(async () => {
     try {
@@ -120,7 +121,7 @@ export default function RetroApp() {
   useEffect(() => {
     if (!user) return;
     const saved = localStorage.getItem(ROOM_KEY);
-    if (!saved || room) return;
+    if (!saved || room || leavingRoomRef.current) return;
     void refreshRoom(saved).catch(() => localStorage.removeItem(ROOM_KEY));
   }, [user, room, refreshRoom]);
 
@@ -132,11 +133,11 @@ export default function RetroApp() {
     let alive = true;
     let busy = false;
     const poll = async () => {
-      if (!alive || busy) return;
+      if (!alive || busy || leavingRoomRef.current) return;
       busy = true;
       try {
         const data = await post("/api/rooms", { action: "state", code: room.code });
-        if (alive) setRoom(data.room);
+        if (alive && !leavingRoomRef.current) setRoom(data.room);
       } catch (err) {
         const message = err instanceof Error ? err.message : "";
         if (/introuvable|pas dans cette room/i.test(message)) {
@@ -221,12 +222,16 @@ export default function RetroApp() {
     finally { setRoomBusy(false); }
   };
 
-  const leaveRoom = async () => {
-    if (!room) return;
-    try { await post("/api/rooms", { action: "leave", code: room.code }); } catch {}
+  const leaveRoom = () => {
+    if (!room || leavingRoomRef.current) return;
+    const code = room.code;
+    leavingRoomRef.current = true;
     localStorage.removeItem(ROOM_KEY);
+    setError("");
     setHockeyActive(false);
+    setActiveGame(null);
     setRoom(null);
+    void post("/api/rooms", { action: "leave", code }).catch(() => undefined).finally(() => { leavingRoomRef.current = false; });
   };
 
   const inviteFriend = async (friend: Friend) => {
@@ -267,7 +272,7 @@ export default function RetroApp() {
   if (room) {
     return <main className={`appShell ${hockeyActive ? "hockeyFocusShell" : ""}`}>
       {hockeyActive ? (
-        <button className="hockeyQuitButton" onClick={() => void leaveRoom()}>Quitter</button>
+        <button className="hockeyQuitButton" onClick={leaveRoom}>Quitter</button>
       ) : (
         <header className="topbar">
           <div className="brandSmall">RETRO <span>GAMING</span></div>
@@ -275,7 +280,7 @@ export default function RetroApp() {
             <small>ROOM</small><strong>{room.code}</strong><span>⧉</span>
           </button>
           <button className="ghostButton returnRoomButton" onClick={() => window.dispatchEvent(new Event("retro:return-room"))}>← Retour à la room</button>
-          <button className="ghostButton dangerText" onClick={() => void leaveRoom()}>Quitter</button>
+          <button className="ghostButton dangerText" onClick={leaveRoom}>Quitter</button>
         </header>
       )}
       {toast && !hockeyActive && <div className="topToast">{toast}</div>}
